@@ -30,7 +30,13 @@ module snap_store #(
     input  wire         I_tvalid,       // 像素有效 (每 beat 4 像素)
     input  wire [95:0]  I_tdata,        // 4像素 RGB888
     // ---- 告警触发 (HDMI域脉冲, 内部两级同步) ----
-    input  wire         I_snap_trig,
+    input  wire         I_snap_trig,       // 自动告警触发
+    input  wire         I_manual_snap_trig,// K2长按触发 (HDMI域展宽脉冲)
+    input  wire [127:0] I_manual_fifo_data,// 显示画面采样RGB565, 每拍8像素
+    input  wire         I_manual_fifo_valid,
+    input  wire         I_manual_fifo_empty,
+    output wire         O_manual_fifo_rd,
+    output wire         O_busy,
     // ---- 检测状态 (日志内容, csi域帧级信号) ----
     input  wire         I_fire_valid,
     input  wire         I_cig_valid,
@@ -69,6 +75,19 @@ module snap_store #(
     end
     wire snap_rise = snap_s2 && !snap_s2d;
 
+    // 手动显示抓拍触发跨到CSI/SD时钟域。
+    reg manual_s1, manual_s2, manual_s2d;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            manual_s1 <= 1'b0; manual_s2 <= 1'b0; manual_s2d <= 1'b0;
+        end else begin
+            manual_s1  <= I_manual_snap_trig;
+            manual_s2  <= manual_s1;
+            manual_s2d <= manual_s2;
+        end
+    end
+    wire manual_snap_rise = manual_s2 && !manual_s2d;
+
     // ================= csi 域帧计数 (日志时间戳) =================
     reg [31:0] frame_cnt;
     always @(posedge I_clk or negedge I_rst_n) begin
@@ -91,6 +110,7 @@ module snap_store #(
     localparam S_WR_GAP     = 4'd4;
     localparam S_WR_THUMB   = 4'd5;
     localparam S_DONE       = 4'd6;
+    localparam S_CAPTURE_MANUAL = 4'd7;
 
     reg [3:0]  state;
     reg [8:0]  beat_cnt;      // 行内拍计数 0..319
@@ -103,6 +123,16 @@ module snap_store #(
     reg [9:0]  byte_idx;      // 扇区写字节索引 0..511
     reg [31:0] ring_ptr;
     reg        busy;
+    reg [127:0] manual_word;
+    reg [2:0]   manual_lane;
+    reg         manual_word_pending;
+    reg         manual_rd_pending;
+    wire [15:0] manual_lane_pixel = manual_pixel(manual_word, manual_lane);
+
+    assign O_busy = busy;
+    assign O_manual_fifo_rd = (state == S_CAPTURE_MANUAL) &&
+                              !manual_word_pending && !manual_rd_pending &&
+                              !I_manual_fifo_empty;
 
     // ---- 采样判定 ----
     wire samp         = (beat_phase < 3'd4) && (row_phase == 3'd0);
@@ -125,6 +155,8 @@ module snap_store #(
     always @(posedge I_clk) begin
         if(state == S_CAPTURE && I_tvalid && samp && !capture_done)
             thumb_ram[thumb_waddr] <= rgb565;
+        else if(state == S_CAPTURE_MANUAL && manual_word_pending)
+            thumb_ram[thumb_waddr] <= manual_lane_pixel;
     end
 
     // 读端口 (SD 写侧, 同步读 1 拍前推; 每 word 拆 2 字节, 低字节在前)
@@ -161,10 +193,39 @@ module snap_store #(
             log_cxmin <= 11'd0; log_cxmax <= 11'd0;
             log_cymin <= 10'd0; log_cymax <= 10'd0;
             log_fire_v <= 1'b0; log_cig_v <= 1'b0;
+            manual_word <= 128'd0;
+            manual_lane <= 3'd0;
+            manual_word_pending <= 1'b0;
+            manual_rd_pending <= 1'b0;
         end else begin
+            if(state != S_CAPTURE_MANUAL) begin
+                manual_rd_pending <= 1'b0;
+            end else begin
+                if(O_manual_fifo_rd)
+                    manual_rd_pending <= 1'b1;
+                if(I_manual_fifo_valid)
+                    manual_rd_pending <= 1'b0;
+            end
             case(state)
                 S_IDLE: begin
-                    if(snap_rise) begin
+                    if(manual_snap_rise) begin
+                        log_frame      <= frame_cnt;
+                        log_fire_area  <= I_fire_area;
+                        log_cig_count  <= I_cig_count;
+
+                        log_fxmin <= I_fxmin; log_fxmax <= I_fxmax;
+                        log_fymin <= I_fymin; log_fymax <= I_fymax;
+                        log_cxmin <= I_cxmin; log_cxmax <= I_cxmax;
+                        log_cymin <= I_cymin; log_cymax <= I_cymax;
+                        log_fire_v <= I_fire_valid;
+                        log_cig_v  <= I_cig_valid;
+                        thumb_cnt <= 16'd0;
+                        thumb_waddr <= 15'd0;
+                        manual_lane <= 3'd0;
+                        manual_word_pending <= 1'b0;
+                        busy <= 1'b1;
+                        state <= S_CAPTURE_MANUAL;
+                    end else if(snap_rise) begin
                         log_frame      <= frame_cnt;
                         log_fire_area  <= I_fire_area;
                         log_cig_count  <= I_cig_count;
@@ -187,6 +248,27 @@ module snap_store #(
                         thumb_cnt   <= 16'd0;
                         thumb_waddr <= 15'd0;
                         state       <= S_CAPTURE;
+                    end
+                end
+                S_CAPTURE_MANUAL: begin
+                    if(I_manual_fifo_valid && !manual_word_pending) begin
+                        manual_word <= I_manual_fifo_data;
+                        manual_lane <= 3'd0;
+                        manual_word_pending <= 1'b1;
+                    end else if(manual_word_pending) begin
+                        thumb_waddr <= thumb_waddr + 15'd1;
+                        thumb_cnt   <= thumb_cnt + 16'd1;
+                        if(manual_lane == 3'd7) begin
+                            manual_word_pending <= 1'b0;
+                            manual_lane <= 3'd0;
+                            if(thumb_cnt == THUMB_PIXELS - 1'b1) begin
+                                sec_idx  <= 7'd0;
+                                byte_idx <= 10'd0;
+                                state    <= S_WR_LOG;
+                            end
+                        end else begin
+                            manual_lane <= manual_lane + 3'd1;
+                        end
                     end
                 end
                 S_CAPTURE: begin
@@ -270,6 +352,23 @@ module snap_store #(
     end
 
     // ================= 日志扇区字节组合输出 =================
+    function [15:0] manual_pixel;
+        input [127:0] word_data;
+        input [2:0] lane;
+        begin
+            case(lane)
+                3'd0: manual_pixel = word_data[15:0];
+                3'd1: manual_pixel = word_data[31:16];
+                3'd2: manual_pixel = word_data[47:32];
+                3'd3: manual_pixel = word_data[63:48];
+                3'd4: manual_pixel = word_data[79:64];
+                3'd5: manual_pixel = word_data[95:80];
+                3'd6: manual_pixel = word_data[111:96];
+                default: manual_pixel = word_data[127:112];
+            endcase
+        end
+    endfunction
+
     function [7:0] log_byte;
         input [9:0]  idx;
         input [31:0] frm;

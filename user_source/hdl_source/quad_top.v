@@ -4,6 +4,7 @@ module quad_top (
     input              I_key,          // KEY1 (低有效, 直连 I_button[1])
     input              I_view_enable,  // 阈值调节期间屏蔽短按视图切换
     input              I_sw2,          // SW2 抓拍使能 (拨下=1, wrapper已反相): 显示右下角相机图标
+    input      [7:0]   I_snap_count,   // completed snapshot count for success feedback
     input      [3:0]   I_sw_raw,       // 原始物理拨片电平: SW1..SW4 -> I_sw[0]..I_sw[3]
     input      [10:0]  I_roi_left,
     input      [10:0]  I_roi_right,
@@ -497,6 +498,23 @@ module quad_top (
     wire [63:0] icon_bits = icon_row(icon_y);       // 函数结果先落 wire 再位选 (V2001)
     wire [1:0]  icon_px   = icon_bits[{icon_x, 1'b0} +: 2];
 
+    // Turn the camera icon green for about one second after a saved snapshot.
+    reg [7:0] snap_count_d;
+    reg [26:0] snap_success_timer;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            snap_count_d <= 8'd0;
+            snap_success_timer <= 27'd0;
+        end else begin
+            snap_count_d <= I_snap_count;
+            if(I_snap_count != snap_count_d)
+                snap_success_timer <= 27'd37_125_000; // 约0.5秒成功提示
+            else if(snap_success_timer != 27'd0)
+                snap_success_timer <= snap_success_timer - 27'd1;
+        end
+    end
+    wire snap_success = (snap_success_timer != 27'd0);
+
     // ---- 输出寄存器 (mux 结果 + 覆盖层; 与同步信号同拍) ----
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
@@ -517,11 +535,11 @@ module quad_top (
                 O_data <= 24'h101820;             // 高对比深色标签底条
             else if(de_i && (view_mode == 3'd0) && sep_hit)
                 O_data <= 24'hFFFFFF;             // 分隔线
-            else if(de_i && I_sw2 && in_icon_x && in_icon_y && (icon_px == 2'd2))
-                O_data <= 24'hEB3C3C;             // SW2相机图标: 红色剪影
-            else if(de_i && I_sw2 && in_icon_x && in_icon_y && (icon_px == 2'd3))
-                O_data <= 24'hF5F5F5;             // SW2相机图标: 镜头高光
-            else if(de_i && I_sw2 && in_icon_x && in_icon_y && (icon_px == 2'd1))
+            else if(de_i && (I_sw2 || snap_success) && in_icon_x && in_icon_y && (icon_px == 2'd2))
+                O_data <= snap_success ? 24'h00E040 : 24'hEB3C3C; // successful save: green silhouette
+            else if(de_i && (I_sw2 || snap_success) && in_icon_x && in_icon_y && (icon_px == 2'd3))
+                O_data <= snap_success ? 24'hD8FFE4 : 24'hF5F5F5; // green success highlight
+            else if(de_i && (I_sw2 || snap_success) && in_icon_x && in_icon_y && (icon_px == 2'd1))
                 O_data <= 24'h1C222C;             // SW2相机图标: 镜头深色内芯
             else
                 O_data <= S_mux_data;

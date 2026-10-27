@@ -118,6 +118,18 @@ module design_top_wrapper (
     wire [7:0]  S_confidence_cam;   // 检测置信度 (csi域帧级)
     wire [95:0] S_snap_tdata;       // AWB 流 (TF卡告警快照源, isp_top.O_snap_tdata)
     wire        S_snap_tuser, S_snap_tvalid;
+    wire [127:0] S_manual_snap_fifo_dout;
+    wire         S_manual_snap_fifo_valid, S_manual_snap_fifo_full;
+    wire         S_manual_snap_fifo_empty, S_manual_snap_fifo_we;
+    wire         S_manual_snap_fifo_re;
+    wire [8:0]   S_manual_snap_fifo_wrusedw, S_manual_snap_fifo_rdusedw;
+    wire [127:0] S_manual_snap_fifo_din;
+    wire         S_snap_store_busy;
+    reg          S_snap_busy_sync1_hdmi, S_snap_busy_sync2_hdmi;
+    wire         S_snap_busy_hdmi = S_snap_busy_sync2_hdmi;
+    wire         S_key2_short, S_key2_long;
+    reg          S_manual_snap_trig_stretch;
+    reg  [3:0]   S_manual_snap_stretch_cnt;
 	reg  [19:0] S_min_area_config_hdmi;
 	reg         S_min_area_toggle_hdmi;
 	reg  [19:0] S_min_area_sync1_cam, S_min_area_sync2_cam, S_min_area_cam;
@@ -710,7 +722,7 @@ isp_top u_isp_top (
 threshold_calib u_threshold_calib(
     .I_clk    (S_csi_rx_clk),
     .I_rst_n  (S_rst_n),
-    .I_key2   (I_button[0]),   // 板载KEY2 低有效; 短按仍归暂停, 长按上调阈值
+    .I_key2   (1'b1),          // K2改为短按暂停/长按手动抓拍, 阈值保持默认150
     .O_lum_th (S_lum_th_cam)
 );
 
@@ -772,6 +784,16 @@ wire [31:0]  S_sec_addr;
 wire [7:0]   S_sec_data;
 wire         S_sec_data_req, S_sec_write_end;
 wire [7:0]   S_snap_count;       // 快照完成计数 (调试 -> UART)
+reg [7:0] S_snap_count_sync1_hdmi, S_snap_count_sync2_hdmi;
+always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+    if(!S_hdmi_rst_n) begin
+        S_snap_count_sync1_hdmi <= 8'd0;
+        S_snap_count_sync2_hdmi <= 8'd0;
+    end else begin
+        S_snap_count_sync1_hdmi <= S_snap_count;
+        S_snap_count_sync2_hdmi <= S_snap_count_sync1_hdmi;
+    end
+end
 (* keep = "true" *) reg [15:0] S_latency_cam;  // ISP流水线时延 (csi域拍数)
 reg [15:0]  S_lat_cnt;
 reg S_candidate_toggle_cam;
@@ -783,6 +805,11 @@ reg [19:0] S_area_th_sync;
 reg [21:0] S_bbox_xmin_sync, S_bbox_xmax_sync;
 reg [19:0] S_bbox_ymin_sync, S_bbox_ymax_sync;
 reg [1:0]  S_bbox_valid_sync;
+// Pause freezes only display OSD metadata; detection and alarm hardware remain live.
+reg [21:0] S_bbox_xmin_pause, S_bbox_xmax_pause;
+reg [19:0] S_bbox_ymin_pause, S_bbox_ymax_pause;
+reg [1:0] S_bbox_valid_pause;
+reg S_fire_alarm_pause;
 reg [39:0] S_area_sync;
 reg [15:0] S_latency_sync;   // ISP段时延 (csi域拍数, 经toggle握手同步到hdmi域)
 reg        S_cig_valid_sync;  // 烟头判定 (csi域 -> hdmi域)
@@ -973,6 +1000,12 @@ snap_store u_snap_store(
     .I_tvalid     (S_snap_tvalid        ),
     .I_tdata      (S_snap_tdata         ),
     .I_snap_trig  (S_snap_trig_stretch  ),
+    .I_manual_snap_trig (S_manual_snap_trig_stretch),
+    .I_manual_fifo_data (S_manual_snap_fifo_dout),
+    .I_manual_fifo_valid(S_manual_snap_fifo_valid),
+    .I_manual_fifo_empty(S_manual_snap_fifo_empty),
+    .O_manual_fifo_rd   (S_manual_snap_fifo_re),
+    .O_busy             (S_snap_store_busy),
     .I_fire_valid (|S_bbox_valid_cam    ),
     .I_cig_valid  (S_cig_valid_cam      ),
     .I_fire_area  (S_area_cam[19:0]     ),
@@ -1043,8 +1076,31 @@ always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
         S_lat_cnt <= S_lat_cnt + 16'd1;
     end
 end
-// ---- K3/K4 专用于面积门槛减/加；K1视图切换、K2画面暂停保持原功能 ----
-    wire S_pause_key_trig;
+// ---- K3/K4调节面积门槛；K1切换视图；K2短按暂停、长按手动抓拍 ----
+    reg S_key2_sync1, S_key2_sync2;
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_key2_sync1 <= 1'b0;
+            S_key2_sync2 <= 1'b0;
+        end else begin
+            S_key2_sync1 <= ~I_button[0];
+            S_key2_sync2 <= S_key2_sync1;
+        end
+    end
+    wire S_key2_press_level = S_key2_sync2;
+    key_calib #(
+        .LONG_CNT     (28'd22275000), // 300ms @ 74.25MHz
+        .DEBOUNCE_CNT (22'd100000)    // 约1.35ms消抖
+    ) u_key2_manual_capture(
+        .I_clk        (S_hdmi_pixel_clk),
+        .I_rst_n      (S_hdmi_rst_n),
+        .I_key1       (1'b0),
+        .I_key2       (S_key2_press_level),
+        .O_key1_short (),
+        .O_key1_long  (),
+        .O_key2_short(S_key2_short),
+        .O_key2_long (S_key2_long)
+    );
     reg S_area_down_trig;
     reg S_area_up_trig;
     reg S_area_key_dn_sync1, S_area_key_dn_sync2;
@@ -1227,18 +1283,53 @@ end
         end
     end
 
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_snap_busy_sync1_hdmi <= 1'b0;
+            S_snap_busy_sync2_hdmi <= 1'b0;
+            S_manual_snap_trig_stretch <= 1'b0;
+            S_manual_snap_stretch_cnt <= 4'd0;
+        end else begin
+            S_snap_busy_sync1_hdmi <= S_snap_store_busy;
+            S_snap_busy_sync2_hdmi <= S_snap_busy_sync1_hdmi;
+            if(S_key2_long && !S_snap_busy_hdmi) begin
+                S_manual_snap_trig_stretch <= 1'b1;
+                S_manual_snap_stretch_cnt <= 4'd0;
+            end else if(S_manual_snap_trig_stretch) begin
+                if(S_manual_snap_stretch_cnt == 4'd15)
+                    S_manual_snap_trig_stretch <= 1'b0;
+                else
+                    S_manual_snap_stretch_cnt <= S_manual_snap_stretch_cnt + 4'd1;
+            end
+        end
+    end
+
     reg  S_display_pause;
-    key_remove_shakes u_pause_key_shakes(
-        .I_clk          (S_hdmi_pixel_clk),
-        .I_rst_n        (S_rst_n         ),
-        .I_key_in       (~I_button[0]    ),
-        .O_key_trig_out (S_pause_key_trig)
-    );
+
     always @(posedge S_hdmi_pixel_clk or negedge S_rst_n) begin
         if(!S_rst_n)
             S_display_pause <= 1'b0;
-        else if(S_pause_key_trig)
+        else if(S_key2_short)
             S_display_pause <= ~S_display_pause;
+    end
+
+    // Freeze box coordinates and alarm text state while the displayed frame is paused.
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_bbox_xmin_pause <= 22'd0;
+            S_bbox_xmax_pause <= 22'd0;
+            S_bbox_ymin_pause <= 20'd0;
+            S_bbox_ymax_pause <= 20'd0;
+            S_bbox_valid_pause <= 2'b0;
+            S_fire_alarm_pause <= 1'b0;
+        end else if(!S_display_pause) begin
+            S_bbox_xmin_pause <= S_bbox_xmin_sync;
+            S_bbox_xmax_pause <= S_bbox_xmax_sync;
+            S_bbox_ymin_pause <= S_bbox_ymin_sync;
+            S_bbox_ymax_pause <= S_bbox_ymax_sync;
+            S_bbox_valid_pause <= S_bbox_valid_sync;
+            S_fire_alarm_pause <= O_led_fire;
+        end
     end
 
     // 暂停信号两级同步到DDR时钟域(video_in的I_display_pause在该域采样)
@@ -1488,7 +1579,8 @@ end
     wire [23:0] S_box_rgb;
     wire [4:0]  S_box_alpha;
     wire        S_box_de, S_box_hsync, S_box_vsync;
-    wire [2:0]  S_box_valid = {1'b0, S_bbox_valid_sync};  // 仅显示两个明火框；烟头检测/告警/抓拍仍保留
+        wire [1:0]  S_bbox_valid_display = S_display_pause ? S_bbox_valid_pause : S_bbox_valid_sync;
+    wire [2:0]  S_box_valid = {1'b0, S_bbox_valid_display};  // paused image uses its frozen frame's box-valid flags
 
     // 每个目标独立映射: QUAD模式缩小一半并平移到右下象限;
     // 全屏模式保留摄像头原坐标。每段打包宽度与 osd_box 的端口约定一致。
@@ -1499,10 +1591,14 @@ end
     genvar box_i;
     generate
         for(box_i=0; box_i<2; box_i=box_i+1) begin : GEN_BBOX_MAP
-            wire [10:0] xmin_in = S_bbox_xmin_sync[box_i*11 +: 11];
-            wire [10:0] xmax_in = S_bbox_xmax_sync[box_i*11 +: 11];
-            wire [9:0]  ymin_in = S_bbox_ymin_sync[box_i*10 +: 10];
-            wire [9:0]  ymax_in = S_bbox_ymax_sync[box_i*10 +: 10];
+            wire [21:0] bbox_xmin_src = S_display_pause ? S_bbox_xmin_pause : S_bbox_xmin_sync;
+            wire [21:0] bbox_xmax_src = S_display_pause ? S_bbox_xmax_pause : S_bbox_xmax_sync;
+            wire [19:0] bbox_ymin_src = S_display_pause ? S_bbox_ymin_pause : S_bbox_ymin_sync;
+            wire [19:0] bbox_ymax_src = S_display_pause ? S_bbox_ymax_pause : S_bbox_ymax_sync;
+            wire [10:0] xmin_in = bbox_xmin_src[box_i*11 +: 11];
+            wire [10:0] xmax_in = bbox_xmax_src[box_i*11 +: 11];
+            wire [9:0]  ymin_in = bbox_ymin_src[box_i*10 +: 10];
+            wire [9:0]  ymax_in = bbox_ymax_src[box_i*10 +: 10];
 
             assign S_bbox_xmin_eff[box_i*11 +: 11] = S_quad_mode_hdmi ?
                 ({1'b0, xmin_in[10:1]} + 11'd640) : xmin_in;
@@ -1579,7 +1675,7 @@ end
         .I_vsync      (S_box_vsync     ),
         // Show ALARM only while the debounced/held fire alarm is active,
         // matching the fire LED instead of the raw per-frame detector.
-        .I_alarm      (O_led_fire      ),
+        .I_alarm      (S_display_pause ? S_fire_alarm_pause : O_led_fire),
         .I_quad_mode  (S_quad_mode_hdmi),   // QUAD模式: ALARM文字1x缩至右下象限
         .O_osd_pixel  (S_alarm_rgb     ),
         .O_osd_alpha  (S_alarm_alpha   ),
@@ -1669,6 +1765,7 @@ end
         .I_key        (I_button[1]     ),   // KEY1: 五态循环 (低有效, 模块内消抖)
         .I_view_enable(1'b1),
         .I_sw2        (~S_sw2_capture  ),   // physical SW2 拨下(往SW2一侧)=显示抓拍使能图标
+        .I_snap_count (S_snap_count_sync2_hdmi), // synchronized completed-snapshot count
         .I_sw_raw     (I_sw            ),   // 物理 SW1..SW4 原始高低电平诊断条
         .I_roi_left   (S_roi_left_config_hdmi),
         .I_roi_right  (S_roi_right_config_hdmi),
@@ -1686,6 +1783,116 @@ end
         .O_data       (S_quad_odata    ),
         .O_view_mode  (S_view_mode_hdmi),
         .O_quad_mode  (S_quad_mode_hdmi)
+    );
+
+    // ---- K2手动抓拍: 对HDMI最终显示流每5列/6行采样RGB565缩略图 ----
+    // 长按触发后等下一帧VSYNC边界；暂停时读到的仍是冻结显示帧。
+    reg S_manual_vsync_d, S_manual_de_d;
+    reg S_manual_wait_frame, S_manual_capture_active;
+    reg S_manual_first_line, S_manual_line_sample;
+    reg [2:0] S_manual_line_phase, S_manual_x_phase;
+    reg [14:0] S_manual_sample_count;
+    reg [2:0] S_manual_pack_count;
+    reg [127:0] S_manual_pack_data;
+    wire S_manual_vsync_rise = S_quad_ovsync && !S_manual_vsync_d;
+    wire S_manual_de_rise = S_quad_ode && !S_manual_de_d;
+    wire S_manual_line_sample_now = S_manual_de_rise ?
+                                      (S_manual_first_line || (S_manual_line_phase == 3'd5)) :
+                                      S_manual_line_sample;
+    wire S_manual_pixel_sample = S_manual_capture_active && S_quad_ode &&
+                                  S_manual_line_sample_now && (S_manual_x_phase == 3'd0);
+    wire [15:0] S_manual_pixel565 = {S_quad_odata[23:19],
+                                     S_quad_odata[15:10],
+                                     S_quad_odata[7:3]};
+    assign S_manual_snap_fifo_we = S_manual_pixel_sample && !S_manual_snap_fifo_full;
+    assign S_manual_snap_fifo_din = {S_manual_pixel565, S_manual_pack_data[111:0]};
+
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_manual_vsync_d <= 1'b0;
+            S_manual_de_d <= 1'b0;
+            S_manual_wait_frame <= 1'b0;
+            S_manual_capture_active <= 1'b0;
+            S_manual_first_line <= 1'b1;
+            S_manual_line_sample <= 1'b0;
+            S_manual_line_phase <= 3'd0;
+            S_manual_x_phase <= 3'd0;
+            S_manual_sample_count <= 15'd0;
+            S_manual_pack_count <= 3'd0;
+            S_manual_pack_data <= 128'd0;
+        end else begin
+            S_manual_vsync_d <= S_quad_ovsync;
+            S_manual_de_d <= S_quad_ode;
+
+            if(S_key2_long && !S_snap_busy_hdmi) begin
+                S_manual_wait_frame <= 1'b1;
+                S_manual_capture_active <= 1'b0;
+                S_manual_sample_count <= 15'd0;
+                S_manual_pack_count <= 3'd0;
+                S_manual_pack_data <= 128'd0;
+            end
+
+            if(S_manual_wait_frame && S_manual_vsync_rise) begin
+                S_manual_wait_frame <= 1'b0;
+                S_manual_capture_active <= 1'b1;
+                S_manual_first_line <= 1'b1;
+                S_manual_line_sample <= 1'b0;
+                S_manual_line_phase <= 3'd0;
+                S_manual_sample_count <= 15'd0;
+                S_manual_pack_count <= 3'd0;
+                S_manual_pack_data <= 128'd0;
+            end
+
+            if(!S_quad_ode) begin
+                S_manual_x_phase <= 3'd0;
+            end else if(S_manual_de_rise) begin
+                S_manual_x_phase <= 3'd1;
+                if(S_manual_first_line) begin
+                    S_manual_first_line <= 1'b0;
+                    S_manual_line_phase <= 3'd0;
+                    S_manual_line_sample <= 1'b1;
+                end else if(S_manual_line_phase == 3'd5) begin
+                    S_manual_line_phase <= 3'd0;
+                    S_manual_line_sample <= 1'b1;
+                end else begin
+                    S_manual_line_phase <= S_manual_line_phase + 3'd1;
+                    S_manual_line_sample <= 1'b0;
+                end
+            end else if(S_manual_x_phase == 3'd4) begin
+                S_manual_x_phase <= 3'd0;
+            end else begin
+                S_manual_x_phase <= S_manual_x_phase + 3'd1;
+            end
+
+            if(S_manual_pixel_sample && !S_manual_snap_fifo_full) begin
+                S_manual_sample_count <= S_manual_sample_count + 15'd1;
+                S_manual_pack_data[S_manual_pack_count*16 +: 16] <= S_manual_pixel565;
+                if(S_manual_pack_count == 3'd7)
+                    S_manual_pack_count <= 3'd0;
+                else
+                    S_manual_pack_count <= S_manual_pack_count + 3'd1;
+
+                if(S_manual_sample_count == 15'd30719)
+                    S_manual_capture_active <= 1'b0;
+            end
+        end
+    end
+
+    w128_d512_fifo u_manual_snap_fifo(
+        .rst        (~S_hdmi_rst_n),
+        .clkw       (S_hdmi_pixel_clk),
+        .clkr       (S_csi_rx_clk),
+        .we         (S_manual_snap_fifo_we),
+        .di         (S_manual_snap_fifo_din),
+        .re         (S_manual_snap_fifo_re),
+        .dout       (S_manual_snap_fifo_dout),
+        .valid      (S_manual_snap_fifo_valid),
+        .full_flag  (S_manual_snap_fifo_full),
+        .empty_flag (S_manual_snap_fifo_empty),
+        .afull      (),
+        .aempty     (),
+        .wrusedw    (S_manual_snap_fifo_wrusedw),
+        .rdusedw    (S_manual_snap_fifo_rdusedw)
     );
 
     hdmi_tx u_hdmi_tx(
