@@ -11,6 +11,7 @@ module isp_top (
 	input [7:0]     I_lum_th,       // 烟头暗光亮点亮度阈值 (threshold_calib, csi域)
 	input [10:0]    I_roi_left,
 	input [10:0]    I_roi_right,
+    input           I_quad_page,
     input 			I_edge_key		,	// KEY1: 边缘检测切换按键(低有效, 直连板级I_button[1])
     output [127:0] 	O_tdata			,
     output [19:0]   O_candidate_count,
@@ -370,20 +371,26 @@ edge_detect_96 #(
         .O_128b_data        ( awb_O_tdata_128  	)
     );
 
-    // ---- 四分屏拼接帧 (三路常驻并行流的 2x2 平均拼接) ----
-    // 控制时序取自 awb (三路同源); 内容取自 awb/edge/mask 三路输出
-    // (edge/mask 相对 awb 有常数拍延迟, 仅表现为象限内容水平平移, 不可见)
+    // Synchronize the slow display-page selection into the camera pixel clock.
+    reg quad_page_sync1, quad_page_sync2;
+    always @(posedge axi4s_video_aclk or negedge I_rst_n) begin
+        if(!I_rst_n) begin quad_page_sync1 <= 1'b0; quad_page_sync2 <= 1'b0; end
+        else begin quad_page_sync1 <= I_quad_page; quad_page_sync2 <= quad_page_sync1; end
+    end
+
+    // ---- Four-pane mosaic: diagnostic page or lightweight processing page ----
     quad_isp u_quad_isp(
-        .I_clk        (axi4s_video_aclk),
-        .I_rst_n      (I_rst_n),
-        .I_tlast      (awb_O_tlast),
-        .I_tuser      (awb_O_tuser),
-        .I_tvalid     (awb_O_tvalid),
-        .I_orig_tdata (awb_O_tdata),
-        .I_edge_tdata (edge_O_tdata),
-        .I_mask_tdata (mask_O_tdata),
-        .O_tdata      (O_quad_tdata),
-        .O_tvalid     (O_quad_tvalid)
+        .I_clk         (axi4s_video_aclk),
+        .I_rst_n       (I_rst_n),
+        .I_tlast       (awb_O_tlast),
+        .I_tuser       (awb_O_tuser),
+        .I_tvalid      (awb_O_tvalid),
+        .I_page_select (quad_page_sync2),
+        .I_orig_tdata  (awb_O_tdata),
+        .I_edge_tdata  (edge_O_tdata),
+        .I_mask_tdata  (mask_O_tdata),
+        .O_tdata       (O_quad_tdata),
+        .O_tvalid      (O_quad_tvalid)
     );
 
 

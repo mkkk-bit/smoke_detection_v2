@@ -86,16 +86,25 @@ module color_mask_96 #(
                 roi_inside = 1'b0;
         end
     endfunction
-    assign O_candidate[0] = is_candidate(pixel0) && roi_inside(roi_col0, I_roi_left, I_roi_right);
-    assign O_candidate[1] = is_candidate(pixel1) && roi_inside(roi_col1, I_roi_left, I_roi_right);
-    assign O_candidate[2] = is_candidate(pixel2) && roi_inside(roi_col2, I_roi_left, I_roi_right);
-    assign O_candidate[3] = is_candidate(pixel3) && roi_inside(roi_col3, I_roi_left, I_roi_right);
+    // Keep the diagnostic RED MASK full-frame, while O_candidate remains
+    // ROI-gated for detection and all candidate statistics.
+    wire [3:0] red_candidate_raw;
+    assign red_candidate_raw[0] = is_candidate(pixel0);
+    assign red_candidate_raw[1] = is_candidate(pixel1);
+    assign red_candidate_raw[2] = is_candidate(pixel2);
+    assign red_candidate_raw[3] = is_candidate(pixel3);
 
-    // Green marks candidate pixels; black is the background for easy threshold tuning.
-    assign O_tdata[95:72] = O_candidate[0] ? 24'h00ff00 : 24'h000000;
-    assign O_tdata[71:48] = O_candidate[1] ? 24'h00ff00 : 24'h000000;
-    assign O_tdata[47:24] = O_candidate[2] ? 24'h00ff00 : 24'h000000;
-    assign O_tdata[23:0]  = O_candidate[3] ? 24'h00ff00 : 24'h000000;
+    assign O_candidate[0] = red_candidate_raw[0] && roi_inside(roi_col0, I_roi_left, I_roi_right);
+    assign O_candidate[1] = red_candidate_raw[1] && roi_inside(roi_col1, I_roi_left, I_roi_right);
+    assign O_candidate[2] = red_candidate_raw[2] && roi_inside(roi_col2, I_roi_left, I_roi_right);
+    assign O_candidate[3] = red_candidate_raw[3] && roi_inside(roi_col3, I_roi_left, I_roi_right);
+
+    // Green marks all color-threshold hits across the full image; detection
+    // still uses O_candidate, which is restricted to the active ROI.
+    assign O_tdata[95:72] = red_candidate_raw[0] ? 24'h00ff00 : 24'h000000;
+    assign O_tdata[71:48] = red_candidate_raw[1] ? 24'h00ff00 : 24'h000000;
+    assign O_tdata[47:24] = red_candidate_raw[2] ? 24'h00ff00 : 24'h000000;
+    assign O_tdata[23:0]  = red_candidate_raw[3] ? 24'h00ff00 : 24'h000000;
     assign O_tlast = I_tlast;
     assign O_tuser = I_tuser;
     assign O_tvalid = I_tvalid;

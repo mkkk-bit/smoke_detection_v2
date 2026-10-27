@@ -147,6 +147,8 @@ module design_top_wrapper (
 
     wire [127:0]   S_quad_tdata_cam;   // 四分屏拼接帧 (quad_isp 输出, 相机域)
     wire           S_quad_tvalid_cam;
+    wire           S_process_quad_hdmi;
+    reg            S_process_quad_cam_sync1, S_process_quad_cam_sync2;
     wire           S_qw_ddr_wr_en;     // 拼接帧 DDR 写用户 (quad_writer)
     wire [24:0]    S_qw_ddr_wr_addr;
     wire [127:0]   S_qw_ddr_wr_data;
@@ -690,7 +692,8 @@ isp_top u_isp_top (
 .I_lum_th        (S_lum_th_cam    ),  // 烟头亮点阈值 (threshold_calib, csi域)
 .I_roi_left      (S_roi_left_cam),
 .I_roi_right     (S_roi_right_cam),
-.I_edge_key      (1'b1),           // KEY1 已上移至显示域 quad_top(五态循环), ISP 恒出原图
+.I_quad_page     (S_process_quad_cam_sync2),
+.I_edge_key      (1'b1),           // KEY1 已上移至显示域 quad_top(六态循环), ISP 恒出原图
 .O_tdata         (S_ISP_O_tdata ),
 .O_candidate_count(S_candidate_count_cam),
 .O_quad_tdata     (S_quad_tdata_cam ),
@@ -719,6 +722,16 @@ isp_top u_isp_top (
 .O_tvalid        (S_ISP_O_tvalid),
 .I_tready        ()
   );
+
+always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+    if(!S_rst_n) begin
+        S_process_quad_cam_sync1 <= 1'b0;
+        S_process_quad_cam_sync2 <= 1'b0;
+    end else begin
+        S_process_quad_cam_sync1 <= S_process_quad_hdmi;
+        S_process_quad_cam_sync2 <= S_process_quad_cam_sync1;
+    end
+end
 
 // ---- 烟头亮点阈值标定: 长按 KEY2(板载, I_button[0]) 循环上调 LUM_TH (csi域) ----
 threshold_calib u_threshold_calib(
@@ -1630,7 +1643,7 @@ end
     wire [23:0] S_box_rgb;
     wire [4:0]  S_box_alpha;
     wire        S_box_de, S_box_hsync, S_box_vsync;
-        wire [1:0]  S_bbox_valid_display = S_display_pause ? S_bbox_valid_pause : S_bbox_valid_sync;
+        wire [1:0]  S_bbox_valid_display = S_process_quad_hdmi ? 2'b00 : (S_display_pause ? S_bbox_valid_pause : S_bbox_valid_sync);
     wire [2:0]  S_box_valid = {1'b0, S_bbox_valid_display};  // paused image uses its frozen frame's box-valid flags
 
     // 每个目标独立映射: QUAD模式缩小一半并平移到右下象限;
@@ -1726,7 +1739,7 @@ end
         .I_vsync      (S_box_vsync     ),
         // Show ALARM only while the debounced/held fire alarm is active,
         // matching the fire LED instead of the raw per-frame detector.
-        .I_alarm      (S_display_pause ? S_fire_alarm_pause : O_led_fire),
+        .I_alarm      (S_process_quad_hdmi ? 1'b0 : (S_display_pause ? S_fire_alarm_pause : O_led_fire)),
         .I_quad_mode  (S_quad_mode_hdmi),   // QUAD模式: ALARM文字1x缩至右下象限
         .O_osd_pixel  (S_alarm_rgb     ),
         .O_osd_alpha  (S_alarm_alpha   ),
@@ -1770,14 +1783,15 @@ end
         .I_de         (S_alarm_de           ),
         .I_hsync      (S_alarm_hsync        ),
         .I_vsync      (S_alarm_vsync        ),
-        .I_show       (S_view_mode_hdmi != 3'd0),  // 全屏视图常显 (QUAD 仅告警弹出)
+        .I_show       (S_view_mode_hdmi >= 3'd2),  // 单屏视图常显
+        .I_suppress   (S_process_quad_hdmi),  // 处理对比页保持四幅图干净
         .I_frame_tick (S_frame_tick         ),
         .I_cand_count (S_display_pause ? S_candidate_count_osd_pause : S_candidate_count_sync),
         .I_area_th    (S_display_pause ? S_area_th_osd_pause : S_area_th_sync),
         .I_latency    (S_display_pause ? S_latency_osd_pause : S_latency_sync),
         .I_fps        (S_display_pause ? S_fps_osd_pause : S_fps_reg),
         .I_snap_count (S_display_pause ? S_snap_count_osd_pause : S_snap_count),
-        .I_fire_valid (S_display_pause ? S_fire_valid_osd_pause : S_fire_valid),
+        .I_fire_valid (S_process_quad_hdmi ? 1'b0 : (S_display_pause ? S_fire_valid_osd_pause : S_fire_valid)),
         .O_osd_pixel  (S_param_rgb          ),
         .O_osd_alpha  (S_param_alpha        ),
         .O_de_out     (S_param_de           ),
@@ -1815,8 +1829,8 @@ end
         .I_de         (S_param_de),
         .I_hsync      (S_param_hsync),
         .I_vsync      (S_param_vsync),
-        .I_show       (S_view_mode_hdmi == 3'd4),
-        .I_quad_mode  (S_quad_mode_hdmi),
+        .I_show       (S_view_mode_hdmi == 3'd5),
+        .I_quad_mode  (S_quad_mode_hdmi && (S_view_mode_hdmi == 3'd0)),
         .I_fire_conf  (S_display_pause ? S_fire_conf_osd_pause : S_confidence_sync),
         .I_cig_conf   (S_display_pause ? S_cig_conf_osd_pause : S_cig_conf_sync),
         .O_osd_pixel  (S_conf_rgb),
@@ -1840,7 +1854,7 @@ end
                                   ({6'd0, S_conf_rgb[7:0]}       * S_conf_alpha) + 14'd8;
     wire [23:0] S_blend4_rgb = {S_blend4_r_full[11:4], S_blend4_g_full[11:4], S_blend4_b_full[11:4]};
     wire [23:0] S_hdmi_tx_data_conf = S_conf_de ? S_blend4_rgb : S_param_blend_d;
-    // ========== 模块4: 四分屏/全屏视图 (KEY1 五态循环: QUAD->原图->边缘->掩码->判定) ==========
+    // ========== 模块4: 四分屏/全屏视图 (KEY1 六态循环: 检测四分屏->处理四分屏->原图->边缘->掩码->目标框) ==========
     // I_vid_*: 原图流 (hdmi_mixer输出, 3拍); I_det_*: 判定流 (alarm流补1拍, 6拍)
     // 模块内: sobel_disp(原图+2拍)/mask_disp(原图+1拍)/延迟对齐, 四路统一到判定流相位
     // QUAD模式: 画面来自DDR拼接帧(quad_writer), 本模块仅叠加象限标签/分隔线/模式名
@@ -1850,7 +1864,7 @@ end
     quad_top u_quad_top(
         .I_clk        (S_hdmi_pixel_clk),
         .I_rst_n      (S_hdmi_rst_n    ),
-        .I_key        (I_button[1]     ),   // KEY1: 五态循环 (低有效, 模块内消抖)
+        .I_key        (I_button[1]     ),   // KEY1: 六态循环 (低有效, 模块内消抖)
         .I_view_enable(1'b1),
         .I_sw2        (~S_sw2_capture  ),   // physical SW2 拨下(往SW2一侧)=显示抓拍使能图标
         .I_snap_count (S_snap_count_sync2_hdmi), // synchronized completed-snapshot count
@@ -1870,7 +1884,8 @@ end
         .O_vsync      (S_quad_ovsync   ),
         .O_data       (S_quad_odata    ),
         .O_view_mode  (S_view_mode_hdmi),
-        .O_quad_mode  (S_quad_mode_hdmi)
+        .O_quad_mode  (S_quad_mode_hdmi),
+        .O_process_quad (S_process_quad_hdmi)
     );
 
     // ---- K2手动抓拍: 对HDMI最终显示流每5列/6行采样RGB565缩略图 ----

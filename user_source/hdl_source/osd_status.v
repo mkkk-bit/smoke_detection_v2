@@ -25,7 +25,8 @@ module osd_status (
     input  wire        I_de,
     input  wire        I_hsync,
     input  wire        I_vsync,
-    input  wire        I_show,        // = (view_mode!=0 全屏视图), 来自 quad_top.O_view_mode
+    input  wire        I_show,        // 全屏页常显; 检测四分屏由告警弹出
+    input  wire        I_suppress,    // 处理对比四分屏时隐藏仪表盘
     input  wire        I_frame_tick,  // 输入帧 tick (hdmi域, 每帧一脉冲)
     input  wire [19:0] I_cand_count,  // 候选像素数 (每帧锁存, CDC 已同步)
     input  wire [19:0] I_area_th,     // 自适应面积阈值 (每帧锁存, CDC 已同步)
@@ -116,7 +117,7 @@ module osd_status (
             else                         popup_cnt    <= popup_cnt + 28'd1;
         end
     end
-    wire panel_show = I_show || popup_active;
+    wire panel_show = !I_suppress && (I_show || popup_active);
 
     // ================= 二进制 -> BCD (组合展开 double-dabble) =================
     function [11:0] bin8_bcd;
