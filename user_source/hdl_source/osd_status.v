@@ -21,6 +21,7 @@
 module osd_status (
     input  wire        I_clk,
     input  wire        I_rst_n,
+    input  wire        I_freeze,     // 暂停时冻结状态/闪烁动画
     input  wire        I_de,
     input  wire        I_hsync,
     input  wire        I_vsync,
@@ -85,7 +86,7 @@ module osd_status (
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n)
             noise_iir <= 20'd0;
-        else if(I_frame_tick)
+        else if(I_frame_tick && !I_freeze)
             noise_iir <= noise_iir - (noise_iir >> 3) + (I_cand_count >> 3);
     end
 
@@ -93,7 +94,7 @@ module osd_status (
     reg [26:0] S_hb_cnt;
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) S_hb_cnt <= 27'd0;
-        else         S_hb_cnt <= S_hb_cnt + 27'd1;
+        else if(!I_freeze) S_hb_cnt <= S_hb_cnt + 27'd1;
     end
     wire hb_blink = S_hb_cnt[25];   // 心跳点 ~1Hz
     wire hb_flash = S_hb_cnt[24];   // 告警边框闪 ~2.2Hz
@@ -107,10 +108,10 @@ module osd_status (
         if(!I_rst_n) begin
             popup_active <= 1'b0;
             popup_cnt    <= 28'd0;
-        end else if(I_fire_valid) begin
+        end else if(!I_freeze && I_fire_valid) begin
             popup_active <= 1'b1;       // 告警期间持续刷新
             popup_cnt    <= 28'd0;
-        end else if(popup_active) begin
+        end else if(!I_freeze && popup_active) begin
             if(popup_cnt == POPUP_HOLD) popup_active <= 1'b0;  // 消退3秒后收起
             else                         popup_cnt    <= popup_cnt + 28'd1;
         end

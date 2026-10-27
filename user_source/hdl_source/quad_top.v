@@ -8,12 +8,12 @@ module quad_top (
     input      [3:0]   I_sw_raw,       // 原始物理拨片电平: SW1..SW4 -> I_sw[0]..I_sw[3]
     input      [10:0]  I_roi_left,
     input      [10:0]  I_roi_right,
-    // 原图流 (hdmi_mixer 输出, 含 LOGO+候选计数OSD, 相对判定流早 3 拍)
+    // 原图流 (hdmi_mixer 输出, 含 LOGO+候选计数OSD, 相对判定流早 5 拍)
     input              I_vid_de,
     input              I_vid_hsync,
     input              I_vid_vsync,
     input  [23:0]      I_vid_data,
-    // 判定流 (osd_box 红框 + osd_alarm 文字 叠加后的原图流, = 原图+3拍)
+    // 判定流 (osd_box + ALARM + 状态面板 + 可信度面板, = 原图+5拍)
     input              I_det_de,
     input              I_det_hsync,
     input              I_det_vsync,
@@ -28,11 +28,11 @@ module quad_top (
 
 // ============================================================
 // 四分屏/全屏视图切换 + KEY1 五态循环 + 视图OSD (时钟 S_hdmi_pixel_clk)
-// 输入两路同源显示流 (同一 VTC 时序, 判定流=原图流+3拍):
+// 输入两路同源显示流 (同一 VTC 时序, 判定流=原图流+5拍):
 //   I_vid_* = 原图流 (hdmi_mixer 输出, 含 LOGO+候选计数OSD)
-//   I_det_* = 判定流 (osd_box+osd_alarm 输出, 原图+红框+ALARM文字)
-// 内部重建: 边缘流 (sobel_disp, +2拍->补1拍), 掩码流 (mask_disp, +1拍->补2拍)
-// 四路对齐到 原图+3拍 后 4:1 mux 寄存 1 拍, 再 1 拍输出寄存器 (总 +5 拍)
+//   I_det_* = 判定流 (框选/ALARM/状态/可信度 OSD 合成后的画面)
+// 内部重建: 边缘流 (+2拍->补3拍), 掩码流 (+1拍->补4拍)
+// 四路对齐到 判定流相位(+5拍) 后 4:1 mux 寄存 1 拍, 再 1 拍输出寄存器 (总 +7 拍)
 // view_mode: 0=QUAD 1=ORIG 2=EDGE 3=MASK 4=DET (KEY1 消抖五态循环)
 // QUAD 模式: 原图流即 DDR 拼接帧 (vo 读拼接缓冲), 判定流叠加红框/ALARM
 //   (坐标已由 wrapper 按 (x>>1)+640,(y>>1)+360 变换到右下象限);
@@ -95,37 +95,55 @@ module quad_top (
         .O_vsync_out (S_mask_vs)
     );
 
-    // ---- 延迟对齐 (统一到 原图+3拍 = 判定流相位) ----
-    // 原图 +0 -> 补3; 边缘 +2 -> 补1; 掩码 +1 -> 补2; 判定 +3 -> 补0
-    reg [23:0] S_orig_d1, S_orig_d2, S_orig_d3;
+    // ---- 延迟对齐 (统一到 原图+5拍 = 判定流相位) ----
+    // 原图 +0 -> 补5; 边缘 +2 -> 补3; 掩码 +1 -> 补4; 判定 +5 -> 补0
+    reg [23:0] S_orig_d1, S_orig_d2, S_orig_d3, S_orig_d4, S_orig_d5;
     reg        S_orig_de1, S_orig_hs1, S_orig_vs1;
     reg        S_orig_de2, S_orig_hs2, S_orig_vs2;
     reg        S_orig_de3, S_orig_hs3, S_orig_vs3;
-    reg [23:0] S_edge_d2;
+    reg        S_orig_de4, S_orig_hs4, S_orig_vs4;
+    reg        S_orig_de5, S_orig_hs5, S_orig_vs5;
+    reg [23:0] S_edge_d2, S_edge_d3, S_edge_d4;
     reg        S_edge_de2, S_edge_hs2, S_edge_vs2;
-    reg [23:0] S_mask_d2, S_mask_d3;
+    reg        S_edge_de3, S_edge_hs3, S_edge_vs3;
+    reg        S_edge_de4, S_edge_hs4, S_edge_vs4;
+    reg [23:0] S_mask_d2, S_mask_d3, S_mask_d4, S_mask_d5;
     reg        S_mask_de2, S_mask_hs2, S_mask_vs2;
     reg        S_mask_de3, S_mask_hs3, S_mask_vs3;
+    reg        S_mask_de4, S_mask_hs4, S_mask_vs4;
+    reg        S_mask_de5, S_mask_hs5, S_mask_vs5;
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
             S_orig_d1 <= 24'd0; S_orig_de1 <= 1'b0; S_orig_hs1 <= 1'b0; S_orig_vs1 <= 1'b0;
             S_orig_d2 <= 24'd0; S_orig_de2 <= 1'b0; S_orig_hs2 <= 1'b0; S_orig_vs2 <= 1'b0;
             S_orig_d3 <= 24'd0; S_orig_de3 <= 1'b0; S_orig_hs3 <= 1'b0; S_orig_vs3 <= 1'b0;
+            S_orig_d4 <= 24'd0; S_orig_de4 <= 1'b0; S_orig_hs4 <= 1'b0; S_orig_vs4 <= 1'b0;
+            S_orig_d5 <= 24'd0; S_orig_de5 <= 1'b0; S_orig_hs5 <= 1'b0; S_orig_vs5 <= 1'b0;
             S_edge_d2 <= 24'd0; S_edge_de2 <= 1'b0; S_edge_hs2 <= 1'b0; S_edge_vs2 <= 1'b0;
+            S_edge_d3 <= 24'd0; S_edge_de3 <= 1'b0; S_edge_hs3 <= 1'b0; S_edge_vs3 <= 1'b0;
+            S_edge_d4 <= 24'd0; S_edge_de4 <= 1'b0; S_edge_hs4 <= 1'b0; S_edge_vs4 <= 1'b0;
             S_mask_d2 <= 24'd0; S_mask_de2 <= 1'b0; S_mask_hs2 <= 1'b0; S_mask_vs2 <= 1'b0;
             S_mask_d3 <= 24'd0; S_mask_de3 <= 1'b0; S_mask_hs3 <= 1'b0; S_mask_vs3 <= 1'b0;
+            S_mask_d4 <= 24'd0; S_mask_de4 <= 1'b0; S_mask_hs4 <= 1'b0; S_mask_vs4 <= 1'b0;
+            S_mask_d5 <= 24'd0; S_mask_de5 <= 1'b0; S_mask_hs5 <= 1'b0; S_mask_vs5 <= 1'b0;
         end else begin
             S_orig_d1 <= I_vid_data;  S_orig_de1 <= I_vid_de;  S_orig_hs1 <= I_vid_hsync; S_orig_vs1 <= I_vid_vsync;
             S_orig_d2 <= S_orig_d1;   S_orig_de2 <= S_orig_de1; S_orig_hs2 <= S_orig_hs1; S_orig_vs2 <= S_orig_vs1;
             S_orig_d3 <= S_orig_d2;   S_orig_de3 <= S_orig_de2; S_orig_hs3 <= S_orig_hs2; S_orig_vs3 <= S_orig_vs2;
+            S_orig_d4 <= S_orig_d3;   S_orig_de4 <= S_orig_de3; S_orig_hs4 <= S_orig_hs3; S_orig_vs4 <= S_orig_vs3;
+            S_orig_d5 <= S_orig_d4;   S_orig_de5 <= S_orig_de4; S_orig_hs5 <= S_orig_hs4; S_orig_vs5 <= S_orig_vs4;
             S_edge_d2 <= {S_edge_dout, S_edge_dout, S_edge_dout};   // 灰度白/黑 -> RGB
             S_edge_de2 <= S_edge_de; S_edge_hs2 <= S_edge_hs; S_edge_vs2 <= S_edge_vs;
+            S_edge_d3 <= S_edge_d2; S_edge_de3 <= S_edge_de2; S_edge_hs3 <= S_edge_hs2; S_edge_vs3 <= S_edge_vs2;
+            S_edge_d4 <= S_edge_d3; S_edge_de4 <= S_edge_de3; S_edge_hs4 <= S_edge_hs3; S_edge_vs4 <= S_edge_vs3;
             S_mask_d2 <= S_mask_dout; S_mask_de2 <= S_mask_de; S_mask_hs2 <= S_mask_hs; S_mask_vs2 <= S_mask_vs;
             S_mask_d3 <= S_mask_d2;   S_mask_de3 <= S_mask_de2; S_mask_hs3 <= S_mask_hs2; S_mask_vs3 <= S_mask_vs2;
+            S_mask_d4 <= S_mask_d3;   S_mask_de4 <= S_mask_de3; S_mask_hs4 <= S_mask_hs3; S_mask_vs4 <= S_mask_vs3;
+            S_mask_d5 <= S_mask_d4;   S_mask_de5 <= S_mask_de4; S_mask_hs5 <= S_mask_hs4; S_mask_vs5 <= S_mask_vs4;
         end
     end
 
-    // ---- 4:1 mux (对齐点: 原图+3拍, 四路 hsync/vsync 同相位) ----
+    // ---- 4:1 mux (对齐点: 判定流+5拍, 四路 hsync/vsync 同相位) ----
     reg [23:0] S_mux_data;
     reg        S_mux_de, S_mux_hs, S_mux_vs;
     always @(posedge I_clk or negedge I_rst_n) begin
@@ -135,16 +153,16 @@ module quad_top (
         end else begin
             case(view_mode)
             3'd1: begin   // ORIG
-                S_mux_data <= S_orig_d3;
-                S_mux_de <= S_orig_de3; S_mux_hs <= S_orig_hs3; S_mux_vs <= S_orig_vs3;
+                S_mux_data <= S_orig_d5;
+                S_mux_de <= S_orig_de5; S_mux_hs <= S_orig_hs5; S_mux_vs <= S_orig_vs5;
             end
             3'd2: begin   // EDGE
-                S_mux_data <= S_edge_d2;
-                S_mux_de <= S_edge_de2; S_mux_hs <= S_edge_hs2; S_mux_vs <= S_edge_vs2;
+                S_mux_data <= S_edge_d4;
+                S_mux_de <= S_edge_de4; S_mux_hs <= S_edge_hs4; S_mux_vs <= S_edge_vs4;
             end
             3'd3: begin   // MASK
-                S_mux_data <= S_mask_d3;
-                S_mux_de <= S_mask_de3; S_mux_hs <= S_mask_hs3; S_mux_vs <= S_mask_vs3;
+                S_mux_data <= S_mask_d5;
+                S_mux_de <= S_mask_de5; S_mux_hs <= S_mask_hs5; S_mux_vs <= S_mask_vs5;
             end
             default: begin  // 0=QUAD, 4=DET: 判定流 (原图+红框+ALARM文字)
                 S_mux_data <= I_det_data;
@@ -419,7 +437,7 @@ module quad_top (
                           (((view_mode == 3'd3) || (view_mode == 3'd4)) && (x_cnt == {1'b0, I_roi_right}));
 
     // Debug the actual switch levels on RED MASK and TARGET views. Four small
-    // indicators are ordered physically SW1, SW2, SW3, SW4 from left to right.
+    // indicators match the board left-to-right physical order: SW4, SW3, SW2, SW1.
     // High is yellow and low is dark gray, so polarity can be checked on the board.
     wire roi_status_quad_mask = (view_mode == 3'd0) &&
         (y_cnt >= 10'd366) && (y_cnt < 10'd374) &&
@@ -442,9 +460,9 @@ module quad_top (
     wire [1:0] roi_status_slot = (roi_status_x < 11'd10) ? 2'd0 :
                                 (roi_status_x < 11'd20) ? 2'd1 :
                                 (roi_status_x < 11'd30) ? 2'd2 : 2'd3;
-    wire roi_status_on = (roi_status_slot == 2'd0) ? I_sw_raw[0] :
-                         (roi_status_slot == 2'd1) ? I_sw_raw[1] :
-                         (roi_status_slot == 2'd2) ? I_sw_raw[2] : I_sw_raw[3];
+    wire roi_status_on = (roi_status_slot == 2'd0) ? I_sw_raw[3] :
+                         (roi_status_slot == 2'd1) ? I_sw_raw[2] :
+                         (roi_status_slot == 2'd2) ? I_sw_raw[1] : I_sw_raw[0];
     wire [23:0] roi_status_color = roi_status_on ? 24'hFFFF00 : 24'h404040;
 
     // ---- SW2 抓拍使能图标: 32x32 红色相机 @ 右下角(1248,688), SW2拨下(往SW2一侧)=显示 ----

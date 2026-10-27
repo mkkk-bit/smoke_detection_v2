@@ -35,7 +35,8 @@ module smoke_bbox_96 #(
     output reg  [9:0]  O_bbox_ymin,
     output reg  [9:0]  O_bbox_ymax,
     output reg         O_valid,       // 面积在 [CNT_MIN,CNT_MAX] 区间
-    output reg  [19:0] O_count        // 帧内亮点像素数 (标定观察)
+    output reg  [19:0] O_count,       // 帧内亮点像素数 (标定观察)
+    output reg  [7:0]  O_confidence   // 烟头置信度 0~100 (可解释)
 );
 
     localparam [9:0] X_BEAT_MAX = IMG_WIDTH/4 - 1;   // 319
@@ -162,6 +163,16 @@ module smoke_bbox_96 #(
     wire [11:0] bbox_h = {2'b0, y_max_r - y_min_r} + 12'd1;   // 包围盒高
     wire aspect_ok = (bbox_w <= (bbox_h << 2)) && (bbox_h <= (bbox_w << 2));
 
+    // roi_mask is formed before counting, so smoke confidence uses only the active ROI.
+    // Area/shape score: no pixels=0, too sparse=40, oversized=20,
+    // elongated=55, compact in-range target=88..99.
+    wire [7:0] conf_size_step = (cnt_accum[19:7] > 8'd11) ? 8'd11 : cnt_accum[19:7];
+    wire [7:0] conf_calc = !any_hit              ? 8'd0  :
+                           (cnt_accum < CNT_MIN) ? 8'd40 :
+                           (cnt_accum > CNT_MAX) ? 8'd20 :
+                           (!aspect_ok)          ? 8'd55 :
+                           (8'd88 + conf_size_step);
+
     // ---- 帧头结算: 锁存上一帧结果 ----
     // tuser 拍锁存 (此时 cnt_accum 已是上一帧累计值, 因 tuser 拍清零在
     // 同一拍非阻塞赋值, 锁存读到的仍是旧值 — 与 detect_ccl_96 语义一致)
@@ -171,12 +182,14 @@ module smoke_bbox_96 #(
             O_bbox_ymin <= 10'd0; O_bbox_ymax <= 10'd0;
             O_valid     <= 1'b0;
             O_count     <= 20'd0;
+            O_confidence <= 8'd0;
         end else if(I_tuser) begin
             O_bbox_xmin <= x_min_r;
             O_bbox_xmax <= x_max_r;
             O_bbox_ymin <= y_min_r;
             O_bbox_ymax <= y_max_r;
             O_count     <= cnt_accum;
+            O_confidence <= conf_calc;
             O_valid     <= any_hit && (cnt_accum >= CNT_MIN) && (cnt_accum <= CNT_MAX) && aspect_ok;
         end
     end

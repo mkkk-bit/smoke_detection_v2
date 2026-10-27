@@ -35,6 +35,7 @@ module isp_top (
     output [9:0]    O_cig_ymax,
     output          O_cig_valid,     // 烟头判定: 亮点面积在 [CNT_MIN,CNT_MAX]
     output [19:0]   O_cig_count,     // 烟头亮点像素数 (标定观察)
+    output [7:0]    O_cig_confidence,// 烟头置信度 0~100
     output [95:0]   O_snap_tdata,    // AWB RGB888 96bit 流 (TF卡告警快照源)
     output          O_snap_tuser,
     output          O_snap_tvalid,
@@ -328,7 +329,8 @@ smoke_bbox_96 #(
     .O_bbox_ymin (O_cig_ymin),
     .O_bbox_ymax (O_cig_ymax),
     .O_valid     (O_cig_valid),
-    .O_count     (O_cig_count)
+    .O_count     (O_cig_count),
+    .O_confidence(O_cig_confidence)
 );
 assign O_fire_valid = fuse_fire_valid;
 assign O_confidence = fuse_confidence;

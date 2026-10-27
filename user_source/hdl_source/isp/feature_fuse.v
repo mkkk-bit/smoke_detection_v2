@@ -118,9 +118,15 @@ module feature_fuse #(
     // ---- 火情判定条件 (4门全过) ----
     wire fire_cond = I_bbox_valid[0] && edge_gate && color_gate && flicker_gate && sat_gate;
 
-    // ---- 检测置信度 (0~99): 4门基础分40 + 候选面积强度0~59 ----
-    wire [7:0] conf_area = (cand_iir_next[19:8] > 8'd59) ? 8'd59 : cand_iir_next[19:8];
-    wire [7:0] conf_next = fire_cond ? (8'd40 + conf_area) : 8'd0;
+    // Inputs are ROI-filtered in color_mask_96/detect_ccl_96, so this confidence
+    // describes only the active between-lines (or outside-lines) detection region.
+    // Explainable fire confidence: bbox 30, color 20, edge 20, flicker 15, saturation 15.
+    wire [7:0] conf_gate_sum = (I_bbox_valid[0] ? 8'd30 : 8'd0) +
+                               (color_gate     ? 8'd20 : 8'd0) +
+                               (edge_gate      ? 8'd20 : 8'd0) +
+                               (flicker_gate   ? 8'd15 : 8'd0) +
+                               (sat_gate       ? 8'd15 : 8'd0);
+    wire [7:0] conf_next = (cand_iir_next < COLOR_MIN) ? 8'd0 : conf_gate_sum;
 
     // ---- 帧级结算 ----
     always @(posedge I_clk or negedge I_rst_n) begin

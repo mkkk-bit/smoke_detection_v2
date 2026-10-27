@@ -1,10 +1,14 @@
 // ============================================================
 // uart_debug.v - 检测状态 UART 调试输出 (每秒一行)
 // 时钟: hdmi 像素时钟域 (74.25MHz)
-// 格式 (29字节, 每秒一次): "F0 C0 T150 P060 L01234 S000\r\n"
-//   F<0/1>=明火  C<0/1>=烟头  T<3位>=烟头阈值  P<3位>=帧率  L<5位>=ISP段时延  S<3位>=快照完成计数
+// 格式 (45字节, 每秒一次):
+//   "F0 C0 T150 P060 L01234 S000 CF092 CG045 LV2\r\n"
+//   F<0/1>=明火  C<0/1>=烟头  T<3位>=烟头阈值  P<3位>=帧率
+//   L<5位>=ISP段时延  S<3位>=快照计数
+//   CF<3位>=明火四维融合置信度(0~100)  CG<3位>=烟头置信度(0~100)
+//   LV<1位>=分级告警等级 (0=正常 1=预警 2=确认)
 // 复用官方 uart_tx.v (115200, 8N1), 输出接板子 UART TX (H1)。
-// 用途: 上位机/串口终端实时监控检测状态, 便于场景标定与记录。
+// 用途: 上位机/串口终端实时监控检测状态与置信度, 便于场景标定与记录。
 // ============================================================
 module uart_debug (
     input  wire        I_clk,          // 74.25MHz
@@ -16,6 +20,9 @@ module uart_debug (
     input  wire [6:0]  I_fps,          // 帧率 (fps)
     input  wire [15:0] I_latency,      // ISP段时延 (csi域拍数)
     input  wire [7:0]  I_snap_count,   // 快照完成计数 (调试)
+    input  wire [7:0]  I_fire_conf,    // 明火四维融合置信度 0~100
+    input  wire [7:0]  I_cig_conf,     // 烟头置信度 0~100
+    input  wire [1:0]  I_level,        // 分级告警等级 0/1/2
     output wire        O_tx_pin
 );
 
@@ -76,9 +83,11 @@ module uart_debug (
     wire [11:0] fps_bcd = bin8_bcd({1'b0, I_fps});   // 7bit -> 3位十进制
     wire [19:0] latency_bcd = bin16_bcd(I_latency);  // 16bit -> 5位十进制
     wire [11:0] snap_bcd = bin8_bcd(I_snap_count);   // 8bit -> 3位十进制
+    wire [11:0] firecf_bcd = bin8_bcd(I_fire_conf);  // 明火置信度 0~100
+    wire [11:0] cigcf_bcd  = bin8_bcd(I_cig_conf);   // 烟头置信度 0~100
 
     // ---- 当前发送字节内容 (组合) ----
-    reg [3:0] byte_idx;
+    reg [5:0] byte_idx;
     reg       sending;
     reg       tx_valid;
     wire      tx_ready;
@@ -86,35 +95,51 @@ module uart_debug (
     always @* begin
         tx_data = 8'h00;
         case(byte_idx)
-            4'd0:  tx_data = 8'h46;                    // 'F'
-            4'd1:  tx_data = 8'h30 + I_fire_valid;     // 明火 0/1
-            4'd2:  tx_data = 8'h20;                    // ' '
-            4'd3:  tx_data = 8'h43;                    // 'C'
-            4'd4:  tx_data = 8'h30 + I_cig_valid;      // 烟头 0/1
-            4'd5:  tx_data = 8'h20;                    // ' '
-            4'd6:  tx_data = 8'h54;                    // 'T'
-            4'd7:  tx_data = 8'h30 + th_bcd[11:8];     // 阈值百位
-            4'd8:  tx_data = 8'h30 + th_bcd[7:4];      // 十位
-            4'd9:  tx_data = 8'h30 + th_bcd[3:0];      // 个位
-            4'd10: tx_data = 8'h20;                    // ' '
-            4'd11: tx_data = 8'h50;                    // 'P'
-            4'd12: tx_data = 8'h30 + fps_bcd[11:8];    // 帧率百位
-            4'd13: tx_data = 8'h30 + fps_bcd[7:4];     // 十位
-            4'd14: tx_data = 8'h30 + fps_bcd[3:0];     // 个位
-            4'd15: tx_data = 8'h20;                    // ' '
-            4'd16: tx_data = 8'h4C;                    // 'L'
-            4'd17: tx_data = 8'h30 + latency_bcd[19:16]; // 时延万位
-            4'd18: tx_data = 8'h30 + latency_bcd[15:12]; // 千位
-            4'd19: tx_data = 8'h30 + latency_bcd[11:8];  // 百位
-            4'd20: tx_data = 8'h30 + latency_bcd[7:4];   // 十位
-            4'd21: tx_data = 8'h30 + latency_bcd[3:0];   // 个位
-            4'd22: tx_data = 8'h20;                    // ' '
-            4'd23: tx_data = 8'h53;                    // 'S'
-            4'd24: tx_data = 8'h30 + snap_bcd[11:8];   // 快照百位
-            4'd25: tx_data = 8'h30 + snap_bcd[7:4];    // 十位
-            4'd26: tx_data = 8'h30 + snap_bcd[3:0];    // 个位
-            4'd27: tx_data = 8'h0D;                    // '\r'
-            4'd28: tx_data = 8'h0A;                    // '\n'
+            6'd0:  tx_data = 8'h46;                    // 'F'
+            6'd1:  tx_data = 8'h30 + I_fire_valid;     // 明火 0/1
+            6'd2:  tx_data = 8'h20;                    // ' '
+            6'd3:  tx_data = 8'h43;                    // 'C'
+            6'd4:  tx_data = 8'h30 + I_cig_valid;      // 烟头 0/1
+            6'd5:  tx_data = 8'h20;                    // ' '
+            6'd6:  tx_data = 8'h54;                    // 'T'
+            6'd7:  tx_data = 8'h30 + th_bcd[11:8];     // 阈值百位
+            6'd8:  tx_data = 8'h30 + th_bcd[7:4];      // 十位
+            6'd9:  tx_data = 8'h30 + th_bcd[3:0];      // 个位
+            6'd10: tx_data = 8'h20;                    // ' '
+            6'd11: tx_data = 8'h50;                    // 'P'
+            6'd12: tx_data = 8'h30 + fps_bcd[11:8];    // 帧率百位
+            6'd13: tx_data = 8'h30 + fps_bcd[7:4];     // 十位
+            6'd14: tx_data = 8'h30 + fps_bcd[3:0];     // 个位
+            6'd15: tx_data = 8'h20;                    // ' '
+            6'd16: tx_data = 8'h4C;                    // 'L'
+            6'd17: tx_data = 8'h30 + latency_bcd[19:16]; // 时延万位
+            6'd18: tx_data = 8'h30 + latency_bcd[15:12]; // 千位
+            6'd19: tx_data = 8'h30 + latency_bcd[11:8];  // 百位
+            6'd20: tx_data = 8'h30 + latency_bcd[7:4];   // 十位
+            6'd21: tx_data = 8'h30 + latency_bcd[3:0];   // 个位
+            6'd22: tx_data = 8'h20;                    // ' '
+            6'd23: tx_data = 8'h53;                    // 'S'
+            6'd24: tx_data = 8'h30 + snap_bcd[11:8];   // 快照百位
+            6'd25: tx_data = 8'h30 + snap_bcd[7:4];    // 十位
+            6'd26: tx_data = 8'h30 + snap_bcd[3:0];    // 个位
+            6'd27: tx_data = 8'h20;                    // ' '
+            6'd28: tx_data = 8'h43;                    // 'C'
+            6'd29: tx_data = 8'h46;                    // 'F'  (明火置信度)
+            6'd30: tx_data = 8'h30 + firecf_bcd[11:8];
+            6'd31: tx_data = 8'h30 + firecf_bcd[7:4];
+            6'd32: tx_data = 8'h30 + firecf_bcd[3:0];
+            6'd33: tx_data = 8'h20;                    // ' '
+            6'd34: tx_data = 8'h43;                    // 'C'
+            6'd35: tx_data = 8'h47;                    // 'G'  (烟头置信度)
+            6'd36: tx_data = 8'h30 + cigcf_bcd[11:8];
+            6'd37: tx_data = 8'h30 + cigcf_bcd[7:4];
+            6'd38: tx_data = 8'h30 + cigcf_bcd[3:0];
+            6'd39: tx_data = 8'h20;                    // ' '
+            6'd40: tx_data = 8'h4C;                    // 'L'
+            6'd41: tx_data = 8'h56;                    // 'V'  (分级告警等级)
+            6'd42: tx_data = 8'h30 + {6'd0, I_level};  // 0/1/2
+            6'd43: tx_data = 8'h0D;                    // '\r'
+            6'd44: tx_data = 8'h0A;                    // '\n'
             default: tx_data = 8'h00;
         endcase
     end
@@ -123,20 +148,20 @@ module uart_debug (
     wire byte_accepted = tx_valid && tx_ready;
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
-            byte_idx <= 4'd0;
+            byte_idx <= 6'd0;
             sending  <= 1'b0;
             tx_valid <= 1'b0;
         end else begin
             if(send_trig && !sending) begin
                 sending  <= 1'b1;
-                byte_idx <= 4'd0;
+                byte_idx <= 6'd0;
                 tx_valid <= 1'b1;
             end else if(sending && byte_accepted) begin
-                if(byte_idx == 4'd28) begin
+                if(byte_idx == 6'd44) begin
                     sending  <= 1'b0;
                     tx_valid <= 1'b0;
                 end else begin
-                    byte_idx <= byte_idx + 4'd1;   // tx_valid 保持 1
+                    byte_idx <= byte_idx + 6'd1;   // tx_valid 保持 1
                 end
             end
         end

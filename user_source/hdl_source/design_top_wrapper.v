@@ -114,6 +114,7 @@ module design_top_wrapper (
     wire [9:0]  S_cig_ymin_cam, S_cig_ymax_cam;
     wire        S_cig_valid_cam;
     wire [19:0] S_cig_count_cam;
+    wire [7:0]  S_cig_conf_cam;
     wire        S_fire_valid_cam;   // 融合火情判定 (isp_top.O_fire_valid, csi域帧级)
     wire [7:0]  S_confidence_cam;   // 检测置信度 (csi域帧级)
     wire [95:0] S_snap_tdata;       // AWB 流 (TF卡告警快照源, isp_top.O_snap_tdata)
@@ -709,6 +710,7 @@ isp_top u_isp_top (
 .O_cig_ymax      (S_cig_ymax_cam   ),
 .O_cig_valid     (S_cig_valid_cam  ),
 .O_cig_count     (S_cig_count_cam  ),
+.O_cig_confidence(S_cig_conf_cam   ),
 .O_snap_tdata    (S_snap_tdata     ),
 .O_snap_tuser    (S_snap_tuser     ),
 .O_snap_tvalid   (S_snap_tvalid    ),
@@ -816,6 +818,10 @@ reg        S_cig_valid_sync;  // 烟头判定 (csi域 -> hdmi域)
 reg [10:0] S_cig_xmin_sync, S_cig_xmax_sync;
 reg [9:0]  S_cig_ymin_sync, S_cig_ymax_sync;
 reg [19:0] S_cig_count_sync;
+reg [7:0] S_cig_conf_sync;   // synchronized smoke confidence
+wire [7:0] S_conf_overall = (S_confidence_sync > S_cig_conf_sync) ? S_confidence_sync : S_cig_conf_sync;
+wire [1:0] S_conf_level = (S_conf_overall >= 8'd80) ? 2'd2 :
+                         (S_conf_overall >= 8'd40) ? 2'd1 : 2'd0;
 // 烟头阈值 CDC (慢信号, 按键长按时才变, 2级同步足够)
 reg [7:0]  S_lum_th_sync1, S_lum_th_sync;
 always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
@@ -851,6 +857,7 @@ always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         S_cig_xmin_sync <= 11'd0; S_cig_xmax_sync <= 11'd0;
         S_cig_ymin_sync <= 10'd0; S_cig_ymax_sync <= 10'd0;
         S_cig_count_sync <= 20'd0;
+        S_cig_conf_sync <= 8'd0;
     end else begin
         S_candidate_toggle_sync1 <= S_candidate_toggle_cam;
         S_candidate_toggle_sync2 <= S_candidate_toggle_sync1;
@@ -873,6 +880,7 @@ always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
             S_cig_ymin_sync <= S_cig_ymin_cam;
             S_cig_ymax_sync <= S_cig_ymax_cam;
             S_cig_count_sync <= S_cig_count_cam;
+            S_cig_conf_sync <= S_cig_conf_cam;
         end
     end
 end
@@ -970,7 +978,7 @@ detect_judge u_detect_judge(
     .I_frame_tick  (S_frame_tick          ),
     .I_candidate   (S_candidate_count_sync),
     .I_fire_valid  (S_fire_valid          ),
-    .I_cig_valid   (S_cig_valid           ),
+    .I_cig_valid  (S_cig_valid     ),
     .O_alarm_fire  (                      ),
     .O_alarm_cig   (                      ),
     .O_buzzer      (O_buzzer              )
@@ -1055,6 +1063,9 @@ uart_debug u_uart_debug(
     .I_frame_tick (S_frame_tick    ),
     .I_fire_valid (S_fire_valid    ),
     .I_cig_valid  (S_cig_valid     ),
+    .I_fire_conf  (S_confidence_sync),
+    .I_cig_conf   (S_cig_conf_sync ),
+    .I_level      (S_conf_level    ),
     .I_lum_th     (S_lum_th_sync   ),
     .I_fps        (S_fps_reg       ),
     .I_latency    (S_latency_sync  ),
@@ -1332,6 +1343,46 @@ end
         end
     end
 
+    // Freeze every visible OSD value with the paused DDR frame.
+    reg [3:0]  S_debug_status_pause;
+    reg [19:0] S_candidate_count_osd_pause, S_min_area_osd_pause, S_max_area_osd_pause;
+    reg        S_threshold_mode_osd_pause;
+    reg [19:0] S_area_th_osd_pause;
+    reg [15:0] S_latency_osd_pause;
+    reg [6:0]  S_fps_osd_pause;
+    reg [7:0]  S_snap_count_osd_pause;
+    reg        S_fire_valid_osd_pause;
+    reg [7:0]  S_fire_conf_osd_pause, S_cig_conf_osd_pause;
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_debug_status_pause <= 4'd0;
+            S_candidate_count_osd_pause <= 20'd0;
+            S_min_area_osd_pause <= 20'd64;
+            S_max_area_osd_pause <= 20'd0;
+            S_threshold_mode_osd_pause <= 1'b0;
+            S_area_th_osd_pause <= 20'd64;
+            S_latency_osd_pause <= 16'd0;
+            S_fps_osd_pause <= 7'd0;
+            S_snap_count_osd_pause <= 8'd0;
+            S_fire_valid_osd_pause <= 1'b0;
+            S_fire_conf_osd_pause <= 8'd0;
+            S_cig_conf_osd_pause <= 8'd0;
+        end else if(!S_display_pause) begin
+            S_debug_status_pause <= S_hdmi_debug_status;
+            S_candidate_count_osd_pause <= S_candidate_count_sync;
+            S_min_area_osd_pause <= S_min_area_config_hdmi;
+            S_max_area_osd_pause <= S_area_sync[19:0];
+            S_threshold_mode_osd_pause <= S_threshold_mode;
+            S_area_th_osd_pause <= S_area_th_sync;
+            S_latency_osd_pause <= S_latency_sync;
+            S_fps_osd_pause <= S_fps_reg;
+            S_snap_count_osd_pause <= S_snap_count;
+            S_fire_valid_osd_pause <= S_fire_valid;
+            S_fire_conf_osd_pause <= S_confidence_sync;
+            S_cig_conf_osd_pause <= S_cig_conf_sync;
+        end
+    end
+
     // 暂停信号两级同步到DDR时钟域(video_in的I_display_pause在该域采样)
     reg S_display_pause_s1;
     reg S_display_pause_s2;
@@ -1560,11 +1611,11 @@ end
         .I_video_de      ( S_hdmi_de          ),
         .I_video_user    ( S_hdmi_user        ),
         .I_video_last    ( S_hdmi_last        ),
-        .I_debug_status  ( S_hdmi_debug_status),
-        .I_candidate_count(S_candidate_count_sync),
-        .I_min_area      ( S_min_area_config_hdmi),
-        .I_max_area      ( S_area_sync[19:0]),
-        .I_threshold_mode( S_threshold_mode),
+        .I_debug_status  ( S_display_pause ? S_debug_status_pause : S_hdmi_debug_status),
+        .I_candidate_count(S_display_pause ? S_candidate_count_osd_pause : S_candidate_count_sync),
+        .I_min_area      ( S_display_pause ? S_min_area_osd_pause : S_min_area_config_hdmi),
+        .I_max_area      ( S_display_pause ? S_max_area_osd_pause : S_area_sync[19:0]),
+        .I_threshold_mode( S_display_pause ? S_threshold_mode_osd_pause : S_threshold_mode),
         .O_video_rd_en   ( S_hdmi_window_rd_en),
         .I_video_rd_data ( S_video_rd_data    ),
         .O_hdmi_vsync    ( S_hdmi_out_vsync   ),
@@ -1715,17 +1766,18 @@ end
     osd_status u_osd_status(
         .I_clk        (S_hdmi_pixel_clk     ),
         .I_rst_n      (S_hdmi_rst_n         ),
+        .I_freeze     (S_display_pause     ),
         .I_de         (S_alarm_de           ),
         .I_hsync      (S_alarm_hsync        ),
         .I_vsync      (S_alarm_vsync        ),
         .I_show       (S_view_mode_hdmi != 3'd0),  // 全屏视图常显 (QUAD 仅告警弹出)
         .I_frame_tick (S_frame_tick         ),
-        .I_cand_count (S_candidate_count_sync),
-        .I_area_th    (S_area_th_sync       ),
-        .I_latency    (S_latency_sync       ),
-        .I_fps        (S_fps_reg            ),
-        .I_snap_count (S_snap_count         ),
-        .I_fire_valid (S_fire_valid         ),
+        .I_cand_count (S_display_pause ? S_candidate_count_osd_pause : S_candidate_count_sync),
+        .I_area_th    (S_display_pause ? S_area_th_osd_pause : S_area_th_sync),
+        .I_latency    (S_display_pause ? S_latency_osd_pause : S_latency_sync),
+        .I_fps        (S_display_pause ? S_fps_osd_pause : S_fps_reg),
+        .I_snap_count (S_display_pause ? S_snap_count_osd_pause : S_snap_count),
+        .I_fire_valid (S_display_pause ? S_fire_valid_osd_pause : S_fire_valid),
         .O_osd_pixel  (S_param_rgb          ),
         .O_osd_alpha  (S_param_alpha        ),
         .O_de_out     (S_param_de           ),
@@ -1752,6 +1804,42 @@ end
                                 S_blend3_b_full[11:4]};
     wire [23:0] S_hdmi_tx_data_param = S_param_de ? S_blend3_rgb : S_alarm_blend_d;
 
+    // ========== 模块3.6: 可信度与分级告警 OSD ==========
+    // 置信度在四分屏 TARGET 区与 DET 全屏显示；分数取明火/烟头两路较高值。
+    wire [23:0] S_conf_rgb;
+    wire [3:0]  S_conf_alpha;
+    wire        S_conf_de, S_conf_hsync, S_conf_vsync;
+    osd_confidence u_osd_confidence(
+        .I_clk        (S_hdmi_pixel_clk),
+        .I_rst_n      (S_hdmi_rst_n),
+        .I_de         (S_param_de),
+        .I_hsync      (S_param_hsync),
+        .I_vsync      (S_param_vsync),
+        .I_show       (S_view_mode_hdmi == 3'd4),
+        .I_quad_mode  (S_quad_mode_hdmi),
+        .I_fire_conf  (S_display_pause ? S_fire_conf_osd_pause : S_confidence_sync),
+        .I_cig_conf   (S_display_pause ? S_cig_conf_osd_pause : S_cig_conf_sync),
+        .O_osd_pixel  (S_conf_rgb),
+        .O_osd_alpha  (S_conf_alpha),
+        .O_de_out     (S_conf_de),
+        .O_hsync_out  (S_conf_hsync),
+        .O_vsync_out  (S_conf_vsync)
+    );
+    reg [23:0] S_param_blend_d;
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n)
+            S_param_blend_d <= 24'd0;
+        else
+            S_param_blend_d <= S_hdmi_tx_data_param;
+    end
+    wire [13:0] S_blend4_r_full = ({6'd0, S_param_blend_d[23:16]} * (5'd16 - S_conf_alpha)) +
+                                  ({6'd0, S_conf_rgb[23:16]}      * S_conf_alpha) + 14'd8;
+    wire [13:0] S_blend4_g_full = ({6'd0, S_param_blend_d[15:8]} * (5'd16 - S_conf_alpha)) +
+                                  ({6'd0, S_conf_rgb[15:8]}      * S_conf_alpha) + 14'd8;
+    wire [13:0] S_blend4_b_full = ({6'd0, S_param_blend_d[7:0]}  * (5'd16 - S_conf_alpha)) +
+                                  ({6'd0, S_conf_rgb[7:0]}       * S_conf_alpha) + 14'd8;
+    wire [23:0] S_blend4_rgb = {S_blend4_r_full[11:4], S_blend4_g_full[11:4], S_blend4_b_full[11:4]};
+    wire [23:0] S_hdmi_tx_data_conf = S_conf_de ? S_blend4_rgb : S_param_blend_d;
     // ========== 模块4: 四分屏/全屏视图 (KEY1 五态循环: QUAD->原图->边缘->掩码->判定) ==========
     // I_vid_*: 原图流 (hdmi_mixer输出, 3拍); I_det_*: 判定流 (alarm流补1拍, 6拍)
     // 模块内: sobel_disp(原图+2拍)/mask_disp(原图+1拍)/延迟对齐, 四路统一到判定流相位
@@ -1773,10 +1861,10 @@ end
         .I_vid_hsync  (S_hdmi_out_hsync),
         .I_vid_vsync  (S_hdmi_out_vsync),
         .I_vid_data   (S_hdmi_out_data ),
-        .I_det_de     (S_param_de       ),
-        .I_det_hsync  (S_param_hsync    ),
-        .I_det_vsync  (S_param_vsync    ),
-        .I_det_data   (S_hdmi_tx_data_param),
+        .I_det_de     (S_conf_de        ),
+        .I_det_hsync  (S_conf_hsync     ),
+        .I_det_vsync  (S_conf_vsync     ),
+        .I_det_data   (S_hdmi_tx_data_conf ),
         .O_de         (S_quad_ode      ),
         .O_hsync      (S_quad_ohsync   ),
         .O_vsync      (S_quad_ovsync   ),
