@@ -61,8 +61,8 @@ module hdmi_mixer #(
     reg [11:0] S_logo_red_x_end;
     reg [14:0] S_logo_addr;
     wire[24:0] S_logo_pixel;
-    // 75% transparent: logo contributes 4/16, video contributes 12/16.
-    localparam [3:0] LOGO_ALPHA = 4'd4;
+    // 75% opaque: logo contributes 12/16, video contributes 4/16.
+    localparam [3:0] LOGO_ALPHA = 4'd12;
     wire [12:0] S_logo_blend_r = ({5'd0, S_video_data_2d[23:16]} * (5'd16 - LOGO_ALPHA)) +
                                   ({5'd0, S_logo_pixel[23:16]} * LOGO_ALPHA) + 13'd8;
     wire [12:0] S_logo_blend_g = ({5'd0, S_video_data_2d[15:8]} * (5'd16 - LOGO_ALPHA)) +

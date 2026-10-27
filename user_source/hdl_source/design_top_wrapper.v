@@ -1256,40 +1256,41 @@ end
     // Keep the guides one displayed pixel clear of the central split line.
     localparam [10:0] ROI_X_MAX = 11'd1277;
     localparam [10:0] ROI_STEP = 11'd8;
+    wire S_roi_left_select  = S_sw4_left_roi && !S_sw3_right_roi;
+    wire S_roi_right_select = S_sw3_right_roi && !S_sw4_left_roi;
+    wire S_roi_select_valid = S_roi_left_select || S_roi_right_select;
+    // Interlock the two ROI enables: if SW3 and SW4 are both on, ignore K3/K4
+    // so one key press can never move both boundaries unexpectedly.
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         if(!S_hdmi_rst_n) begin
             S_roi_left_config_hdmi <= 11'd320;
             S_roi_right_config_hdmi <= 11'd960;
             S_roi_toggle_hdmi <= 1'b0;
-        end else if(!S_threshold_mode && (S_area_down_trig || S_area_up_trig)) begin
-            if(S_area_down_trig) begin // K3: enabled boundary moves right
-                if(S_sw4_left_roi) begin // physical SW4 enables left boundary
+        end else if(!S_threshold_mode && S_roi_select_valid && (S_area_down_trig || S_area_up_trig)) begin
+            if(S_area_down_trig) begin // K3: selected boundary moves right
+                if(S_roi_left_select) begin
                     if(S_roi_left_config_hdmi > ROI_X_MAX - ROI_STEP)
                         S_roi_left_config_hdmi <= ROI_X_MAX;
                     else
                         S_roi_left_config_hdmi <= S_roi_left_config_hdmi + ROI_STEP;
-                end
-                if(S_sw3_right_roi) begin // physical SW3 enables right boundary
+                end else if(S_roi_right_select) begin
                     if(S_roi_right_config_hdmi > ROI_X_MAX - ROI_STEP)
                         S_roi_right_config_hdmi <= ROI_X_MAX;
                     else
                         S_roi_right_config_hdmi <= S_roi_right_config_hdmi + ROI_STEP;
                 end
-                if(S_sw4_left_roi || S_sw3_right_roi)
-                    S_roi_toggle_hdmi <= ~S_roi_toggle_hdmi;
-            end else begin // K4: enabled boundary moves left
-                if(S_sw4_left_roi)
+                S_roi_toggle_hdmi <= ~S_roi_toggle_hdmi;
+            end else begin // K4: selected boundary moves left
+                if(S_roi_left_select)
                     S_roi_left_config_hdmi <= (S_roi_left_config_hdmi < ROI_STEP) ?
                                               11'd0 : S_roi_left_config_hdmi - ROI_STEP;
-                if(S_sw3_right_roi)
+                else if(S_roi_right_select)
                     S_roi_right_config_hdmi <= (S_roi_right_config_hdmi < ROI_STEP) ?
                                                11'd0 : S_roi_right_config_hdmi - ROI_STEP;
-                if(S_sw4_left_roi || S_sw3_right_roi)
-                    S_roi_toggle_hdmi <= ~S_roi_toggle_hdmi;
+                S_roi_toggle_hdmi <= ~S_roi_toggle_hdmi;
             end
         end
     end
-
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         if(!S_hdmi_rst_n) begin
             S_min_area_config_hdmi <= 20'd64;

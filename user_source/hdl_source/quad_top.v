@@ -266,8 +266,8 @@ module quad_top (
             end else begin
                 case({s,i})
                     5'd0:lbl_char=0; 5'd1:lbl_char=1; 5'd2:lbl_char=2; 5'd3:lbl_char=3; 5'd4:lbl_char=2; 5'd5:lbl_char=4; 5'd6:lbl_char=5; 5'd7:lbl_char=6;
-                    5'd8:lbl_char=7; 5'd9:lbl_char=8; 5'd10:lbl_char=3; 5'd11:lbl_char=7; 5'd12:lbl_char=31; 5'd13:lbl_char=8; 5'd14:lbl_char=5; 5'd15:lbl_char=14;
-                    5'd16:lbl_char=1; 5'd17:lbl_char=7; 5'd18:lbl_char=8; 5'd19:lbl_char=31; 5'd20:lbl_char=1; 5'd21:lbl_char=5; 5'd22:lbl_char=10; 5'd23:lbl_char=11;
+                    5'd8:lbl_char=7; 5'd9:lbl_char=8; 5'd10:lbl_char=3; 5'd11:lbl_char=7; 5'd12:lbl_char=31; 5'd13:lbl_char=9; 5'd14:lbl_char=5; 5'd15:lbl_char=14;
+                    5'd16:lbl_char=1; 5'd17:lbl_char=7; 5'd18:lbl_char=8; 5'd19:lbl_char=31; 5'd20:lbl_char=9; 5'd21:lbl_char=5; 5'd22:lbl_char=10; 5'd23:lbl_char=11;
                     5'd24:lbl_char=13; 5'd25:lbl_char=5; 5'd26:lbl_char=1; 5'd27:lbl_char=3; 5'd28:lbl_char=5; 5'd29:lbl_char=13;
                     default:lbl_char=31;
                 endcase
