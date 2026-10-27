@@ -18,8 +18,8 @@ module osd_box #(
     parameter [9:0]  V_TOTAL     = 10'd750,  // HDMI场总行数
     parameter [9:0]  V_SYNC_START= 10'd725,  // vsync起始行
     parameter [3:0]  BORDER_T    = 4'd3,     // 边框线宽(像素)
-    parameter [4:0]  ALPHA_FIRE  = 5'd16,    // 明火框alpha (16=不透明)
-    parameter [4:0]  ALPHA_SMOKE = 5'd16     // 烟头框alpha
+    parameter [4:0]  ALPHA_FIRE  = 5'd8,     // 明火框alpha (8=50%半透明, 不遮挡框内目标)
+    parameter [4:0]  ALPHA_SMOKE = 5'd8      // 烟头框alpha (8=50%半透明)
 )(
     input                      I_clk,
     input                      I_rst_n,

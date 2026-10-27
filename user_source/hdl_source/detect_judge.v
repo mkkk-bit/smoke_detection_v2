@@ -28,18 +28,18 @@ module detect_judge #(
     input              I_clk,
     input              I_rst_n,
     input              I_frame_tick,   // 每帧一个脉冲
-    input       [19:0] I_candidate,    // 帧候选像素数 (L2烟头路径使用)
+    input       [19:0] I_candidate,    // 帧候选像素数 (保留, L2 旧路径)
     input              I_fire_valid,   // 目标检测有效 (bbox, 与OSD同源)
+    input              I_cig_valid,    // 烟头有效 (smoke_bbox, 暗光亮点)
     output reg         O_alarm_fire,   // L1 明火告警 (蜂鸣器音源门控)
-    output reg         O_alarm_cig,    // L2 烟头告警 (预留, 当前未接)
+    output reg         O_alarm_cig,    // L2 烟头告警
     output reg         O_buzzer        // 蜂鸣方波 (国标火警双音交替, 低电平有效)
 );
 
 // ---- 帧判定 (在帧结算沿评估) ----
-// L1 触发源 = 目标检测有效 (bbox, 与OSD ALARM同源); L2 烟头路径预留
+// L1 触发源 = 目标检测有效 (bbox, 与OSD ALARM同源); L2 = smoke_bbox 暗光亮点烟头
 wire fire_cand = I_fire_valid;
-wire cig_cand  = !I_fire_valid &&
-                 (I_candidate >= TH_SMALL_MIN) && (I_candidate <= TH_SMALL_MAX);
+wire cig_cand  = I_cig_valid;
 
 // ---- 积分器 (钳位[0, SCORE_CLAMP]) ----
 reg [8:0] score_fire;
@@ -140,7 +140,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
     if(!I_rst_n)
         O_buzzer <= 1'b1;      // 复位静音 (高电平=三极管截止)
     else
-        O_buzzer <= O_alarm_fire ? ~tone : 1'b1;
+        O_buzzer <= (O_alarm_fire || O_alarm_cig) ? ~tone : 1'b1;
 end
 
 endmodule

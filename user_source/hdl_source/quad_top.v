@@ -3,6 +3,10 @@ module quad_top (
     input              I_rst_n,
     input              I_key,          // KEY1 (低有效, 直连 I_button[1])
     input              I_view_enable,  // 阈值调节期间屏蔽短按视图切换
+    input              I_sw2,          // SW2 抓拍使能 (拨下=1, wrapper已反相): 显示右下角相机图标
+    input      [3:0]   I_sw_raw,       // 原始物理拨片电平: SW1..SW4 -> I_sw[0]..I_sw[3]
+    input      [10:0]  I_roi_left,
+    input      [10:0]  I_roi_right,
     // 原图流 (hdmi_mixer 输出, 含 LOGO+候选计数OSD, 相对判定流早 3 拍)
     input              I_vid_de,
     input              I_vid_hsync,
@@ -398,6 +402,101 @@ module quad_top (
     wire sep_hit = (x_cnt == 11'd639) || (x_cnt == 11'd640) ||
                    (y_cnt == 10'd359) || (y_cnt == 10'd360);
 
+    // ROI guides appear in the RED MASK and TARGET panes in both QUAD and
+    // full-screen views. The camera image is downscaled 2:1 in QUAD view.
+    wire [9:0] roi_left_disp  = I_roi_left[10:1];
+    wire [9:0] roi_right_disp = I_roi_right[10:1];
+    wire roi_quad_mask = (view_mode == 3'd0) && (y_cnt >= 10'd361) &&
+                         (x_cnt < 11'd639);
+    wire roi_quad_target = (view_mode == 3'd0) && (y_cnt >= 10'd361) &&
+                           (x_cnt >= 11'd641);
+    wire roi_left_line = (roi_quad_mask && (x_cnt == {1'b0, roi_left_disp})) ||
+                         (roi_quad_target && (x_cnt == (11'd641 + {1'b0, roi_left_disp}))) ||
+                         (((view_mode == 3'd3) || (view_mode == 3'd4)) && (x_cnt == {1'b0, I_roi_left}));
+    wire roi_right_line = (roi_quad_mask && (x_cnt == {1'b0, roi_right_disp})) ||
+                          (roi_quad_target && (x_cnt == (11'd641 + {1'b0, roi_right_disp}))) ||
+                          (((view_mode == 3'd3) || (view_mode == 3'd4)) && (x_cnt == {1'b0, I_roi_right}));
+
+    // Debug the actual switch levels on RED MASK and TARGET views. Four small
+    // indicators are ordered physically SW1, SW2, SW3, SW4 from left to right.
+    // High is yellow and low is dark gray, so polarity can be checked on the board.
+    wire roi_status_quad_mask = (view_mode == 3'd0) &&
+        (y_cnt >= 10'd366) && (y_cnt < 10'd374) &&
+        (x_cnt >= 11'd92) && (x_cnt < 11'd132);
+    wire roi_status_quad_target = (view_mode == 3'd0) &&
+        (y_cnt >= 10'd366) && (y_cnt < 10'd374) &&
+        (x_cnt >= 11'd732) && (x_cnt < 11'd772);
+    wire roi_status_full = ((view_mode == 3'd3) || (view_mode == 3'd4)) &&
+        (y_cnt >= 10'd24) && (y_cnt < 10'd32) &&
+        (x_cnt >= 11'd1192) && (x_cnt < 11'd1232);
+    wire roi_status_region = roi_status_quad_mask || roi_status_quad_target || roi_status_full;
+    wire [10:0] roi_status_x = roi_status_quad_target ? (x_cnt - 11'd732) :
+                               roi_status_quad_mask ? (x_cnt - 11'd92) :
+                               (x_cnt - 11'd1192);
+    wire roi_status_hit = roi_status_region &&
+        ((roi_status_x < 11'd8) ||
+         ((roi_status_x >= 11'd10) && (roi_status_x < 11'd18)) ||
+         ((roi_status_x >= 11'd20) && (roi_status_x < 11'd28)) ||
+         ((roi_status_x >= 11'd30) && (roi_status_x < 11'd38)));
+    wire [1:0] roi_status_slot = (roi_status_x < 11'd10) ? 2'd0 :
+                                (roi_status_x < 11'd20) ? 2'd1 :
+                                (roi_status_x < 11'd30) ? 2'd2 : 2'd3;
+    wire roi_status_on = (roi_status_slot == 2'd0) ? I_sw_raw[0] :
+                         (roi_status_slot == 2'd1) ? I_sw_raw[1] :
+                         (roi_status_slot == 2'd2) ? I_sw_raw[2] : I_sw_raw[3];
+    wire [23:0] roi_status_color = roi_status_on ? 24'hFFFF00 : 24'h404040;
+
+    // ---- SW2 抓拍使能图标: 32x32 红色相机 @ 右下角(1248,688), SW2拨下(往SW2一侧)=显示 ----
+    // 每像素2bit编码: 00透明 / 01深色(镜头内芯) / 10红色 / 11高光
+    // 位图由 render_snap_icons.py 从已批准渲染图(icon_a_camera_red.png)逐像素生成(4x4子像素阈值)
+    function [63:0] icon_row;
+        input [4:0] r;
+        begin
+            case(r)
+            5'd00: icon_row = 64'h0000000000000000;
+            5'd01: icon_row = 64'h0000000000000000;
+            5'd02: icon_row = 64'h0000000000000000;
+            5'd03: icon_row = 64'h0000002AA8000000;
+            5'd04: icon_row = 64'h000000AAAA000000;
+            5'd05: icon_row = 64'h000000AAAA000000;
+            5'd06: icon_row = 64'h000000AAAA000000;
+            5'd07: icon_row = 64'h000000AAAA000000;
+            5'd08: icon_row = 64'h000000AAAA000000;
+            5'd09: icon_row = 64'h002AAAAAAAAAA800;
+            5'd10: icon_row = 64'h00AAAAAAAAAAAA00;
+            5'd11: icon_row = 64'h02AAAAAAAAAAAA80;
+            5'd12: icon_row = 64'h02AAAAAAAAAAAA80;
+            5'd13: icon_row = 64'h02AAAAA55AAAAA80;
+            5'd14: icon_row = 64'h02AAAA5555AAAA80;
+            5'd15: icon_row = 64'h02AAA9557F6AAA80;
+            5'd16: icon_row = 64'h02AAA5557F6AAA80;
+            5'd17: icon_row = 64'h02AAA5557F5AAA80;
+            5'd18: icon_row = 64'h02AAA5555D5AAA80;
+            5'd19: icon_row = 64'h02AAA555555AAA80;
+            5'd20: icon_row = 64'h02AAA555555AAA80;
+            5'd21: icon_row = 64'h02AAA555556AAA80;
+            5'd22: icon_row = 64'h02AAA955556AAA80;
+            5'd23: icon_row = 64'h02AAAA5555AAAA80;
+            5'd24: icon_row = 64'h02AAAA9556AAAA80;
+            5'd25: icon_row = 64'h02AAAAAAAAAAAA80;
+            5'd26: icon_row = 64'h02AAAAAAAAAAAA80;
+            5'd27: icon_row = 64'h00AAAAAAAAAAAA00;
+            5'd28: icon_row = 64'h002AAAAAAAAAA800;
+            5'd29: icon_row = 64'h0000000000000000;
+            5'd30: icon_row = 64'h0000000000000000;
+            5'd31: icon_row = 64'h0000000000000000;
+            default: icon_row = 64'h0000000000000000;
+            endcase
+        end
+    endfunction
+
+    wire        in_icon_x = (x_cnt >= 11'd1248) && (x_cnt < 11'd1280);
+    wire        in_icon_y = (y_cnt >= 10'd688)  && (y_cnt < 10'd720);
+    wire [4:0]  icon_x    = x_cnt[4:0];             // 1248 % 32 == 0, 低5位即图标列
+    wire [4:0]  icon_y    = y_cnt[4:0] - 5'd16;     // 688 % 32 == 16 (5bit模减自动回绕0..31)
+    wire [63:0] icon_bits = icon_row(icon_y);       // 函数结果先落 wire 再位选 (V2001)
+    wire [1:0]  icon_px   = icon_bits[{icon_x, 1'b0} +: 2];
+
     // ---- 输出寄存器 (mux 结果 + 覆盖层; 与同步信号同拍) ----
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
@@ -406,12 +505,24 @@ module quad_top (
             O_de    <= S_mux_de;
             O_hsync <= S_mux_hs;
             O_vsync <= S_mux_vs;
-            if(de_i && w_glyph)
+            if(de_i && roi_left_line)
+                O_data <= 24'hFFFF00;             // 左边界: 黄色
+            else if(de_i && roi_right_line)
+                O_data <= 24'h00FFFF;             // 右边界: 青色
+            else if(de_i && roi_status_hit)
+                O_data <= roi_status_color;        // raw SW1..SW4 status, high=yellow
+            else if(de_i && w_glyph)
                 O_data <= 24'hFFFFFF;             // 白字
             else if(de_i && (quad_label_bg || fullscreen_label_bg))
                 O_data <= 24'h101820;             // 高对比深色标签底条
             else if(de_i && (view_mode == 3'd0) && sep_hit)
                 O_data <= 24'hFFFFFF;             // 分隔线
+            else if(de_i && I_sw2 && in_icon_x && in_icon_y && (icon_px == 2'd2))
+                O_data <= 24'hEB3C3C;             // SW2相机图标: 红色剪影
+            else if(de_i && I_sw2 && in_icon_x && in_icon_y && (icon_px == 2'd3))
+                O_data <= 24'hF5F5F5;             // SW2相机图标: 镜头高光
+            else if(de_i && I_sw2 && in_icon_x && in_icon_y && (icon_px == 2'd1))
+                O_data <= 24'h1C222C;             // SW2相机图标: 镜头深色内芯
             else
                 O_data <= S_mux_data;
         end

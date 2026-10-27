@@ -119,6 +119,12 @@ module hdmi_mixer #(
     reg [3:0]  S_pf_row;
     wire [15:0] S_pf_row_bits;
     reg        S_pf_on;
+    reg [7:0]  S_metric_ascii;
+    reg [2:0]  S_metric_row;
+    reg [2:0]  S_metric_col;
+    reg [2:0]  S_metric_slot;
+    reg [4:0]  S_metric_bits;
+    reg        S_metric_glyph;
     reg [9:0]  S_pf_scale_x;
     reg [9:0]  S_pf_scale_y;
 
@@ -515,6 +521,23 @@ module hdmi_mixer #(
         end
     endfunction
 
+    // Compact white-on-navy labels, matching the four pane headers.
+    function [4:0] F_metric_row5;
+        input [7:0] ch;
+        input [2:0] row;
+        begin
+            case(ch)
+                8'h41: case(row) 0:F_metric_row5=5'b01110; 1:F_metric_row5=5'b10001; 2:F_metric_row5=5'b10001; 3:F_metric_row5=5'b11111; 4:F_metric_row5=5'b10001; 5:F_metric_row5=5'b10001; 6:F_metric_row5=5'b10001; default:F_metric_row5=5'b00000; endcase
+                8'h45: case(row) 0:F_metric_row5=5'b11111; 1:F_metric_row5=5'b10000; 2:F_metric_row5=5'b10000; 3:F_metric_row5=5'b11110; 4:F_metric_row5=5'b10000; 5:F_metric_row5=5'b10000; 6:F_metric_row5=5'b11111; default:F_metric_row5=5'b00000; endcase
+                8'h49: case(row) 0:F_metric_row5=5'b11111; 1:F_metric_row5=5'b00100; 2:F_metric_row5=5'b00100; 3:F_metric_row5=5'b00100; 4:F_metric_row5=5'b00100; 5:F_metric_row5=5'b00100; 6:F_metric_row5=5'b11111; default:F_metric_row5=5'b00000; endcase
+                8'h4d: case(row) 0:F_metric_row5=5'b10001; 1:F_metric_row5=5'b11011; 2:F_metric_row5=5'b10101; 3:F_metric_row5=5'b10101; 4:F_metric_row5=5'b10001; 5:F_metric_row5=5'b10001; 6:F_metric_row5=5'b10001; default:F_metric_row5=5'b00000; endcase
+                8'h4e: case(row) 0:F_metric_row5=5'b10001; 1:F_metric_row5=5'b11001; 2:F_metric_row5=5'b10101; 3:F_metric_row5=5'b10011; 4:F_metric_row5=5'b10001; 5:F_metric_row5=5'b10001; 6:F_metric_row5=5'b10001; default:F_metric_row5=5'b00000; endcase
+                8'h52: case(row) 0:F_metric_row5=5'b11110; 1:F_metric_row5=5'b10001; 2:F_metric_row5=5'b10001; 3:F_metric_row5=5'b11110; 4:F_metric_row5=5'b10100; 5:F_metric_row5=5'b10010; 6:F_metric_row5=5'b10001; default:F_metric_row5=5'b00000; endcase
+                8'h58: case(row) 0:F_metric_row5=5'b10001; 1:F_metric_row5=5'b10001; 2:F_metric_row5=5'b01010; 3:F_metric_row5=5'b00100; 4:F_metric_row5=5'b01010; 5:F_metric_row5=5'b10001; 6:F_metric_row5=5'b10001; default:F_metric_row5=5'b00000; endcase
+                default: F_metric_row5=5'b00000;
+            endcase
+        end
+    endfunction
     assign O_video_rd_en = I_video_de;
 
     anlogic_logo_rom u_anlogic_logo_rom(
@@ -716,6 +739,8 @@ module hdmi_mixer #(
         S_pf_col = 4'd0;
         S_pf_row = 4'd0;
         S_pf_on = 1'b0;
+        S_metric_ascii = 8'h20; S_metric_row = 3'd0; S_metric_col = 3'd0;
+        S_metric_slot = 3'd0; S_metric_bits = 5'd0; S_metric_glyph = 1'b0;
         S_pf_scale_x = 10'd0;
         S_pf_scale_y = 10'd0;
 
@@ -1024,9 +1049,40 @@ module hdmi_mixer #(
                 end
                 end // first OSD line (frame count)
 
-                if(S_dyn_on) begin
+                // MIN AREA / MAX AREA use the pane-title glyph size, with yellow text only.
+                if((S_dyn_y >= 12'd24) && (S_dyn_y < 12'd72) && (S_dyn_x < 12'd64)) begin
+                    // Suppress the legacy label layer and leave all non-glyph pixels transparent.
+                    S_dyn_on = 1'b0;
+                    if(((S_dyn_y >= 12'd28) && (S_dyn_y < 12'd44)) ||
+                       ((S_dyn_y >= 12'd52) && (S_dyn_y < 12'd68))) begin
+                        S_metric_slot = S_dyn_x[5:3];
+                        S_metric_col = S_dyn_x[2:0];
+                        if(S_dyn_y < 12'd48) begin
+                            S_metric_row = (S_dyn_y - 12'd28) >> 1;
+                            case(S_metric_slot)
+                                3'd0:S_metric_ascii=8'h4d; 3'd1:S_metric_ascii=8'h49; 3'd2:S_metric_ascii=8'h4e;
+                                3'd4:S_metric_ascii=8'h41; 3'd5:S_metric_ascii=8'h52; 3'd6:S_metric_ascii=8'h45; 3'd7:S_metric_ascii=8'h41;
+                                default:S_metric_ascii=8'h20;
+                            endcase
+                        end else begin
+                            S_metric_row = (S_dyn_y - 12'd52) >> 1;
+                            case(S_metric_slot)
+                                3'd0:S_metric_ascii=8'h4d; 3'd1:S_metric_ascii=8'h41; 3'd2:S_metric_ascii=8'h58;
+                                3'd4:S_metric_ascii=8'h41; 3'd5:S_metric_ascii=8'h52; 3'd6:S_metric_ascii=8'h45; 3'd7:S_metric_ascii=8'h41;
+                                default:S_metric_ascii=8'h20;
+                            endcase
+                        end
+                        S_metric_bits = F_metric_row5(S_metric_ascii, S_metric_row);
+                        S_metric_glyph = S_metric_bits[3'd4 - S_metric_col];
+                        if(S_metric_glyph) begin
+                            S_osd_hit = 1'b1;
+                            S_osd_color = COLOR_DYN_TEXT;
+                        end
+                    end
+                end else if(S_dyn_on) begin
                     S_osd_hit = 1'b1;
-                    S_osd_color = I_threshold_mode ? 24'h00ff00 : COLOR_DYN_TEXT;
+                    // Keep MIN/MAX values yellow in both ROI and threshold modes.
+                    S_osd_color = COLOR_DYN_TEXT;
                 end
             end
         end

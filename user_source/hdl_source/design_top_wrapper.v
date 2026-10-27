@@ -10,6 +10,7 @@ module design_top_wrapper (
     output wire       O_cam_rst,
       
     inout wire [3:0]  I_button,
+    input wire [3:0]  I_sw,       // 乒乓开关 SW1~SW4 (拨上=1); SW2=抓拍使能(拨下/往SW2一侧=使能)
 
     output wire       O_screen_pwm,
     output wire       O_led_fire,    // 阶段1: 明火告警LED (D10, 高亮=告警)
@@ -39,7 +40,16 @@ module design_top_wrapper (
     inout wire[1:0]   ddr_dm,
     inout wire[15:0]  ddr_dq,
     inout wire[1:0]   ddr_dqs_p,
-    inout wire[1:0]   ddr_dqs_n   
+    inout wire[1:0]   ddr_dqs_n,
+
+    // TF卡 SD (SPI模式): SD_nCS=SD_DAT3(B12), SD_DCLK=SD_CLK(A7), SD_MOSI=SD_CMD(A8), SD_MISO=SD_DAT0(E8)
+    output wire       SD_nCS,
+    output wire       SD_DCLK,
+    output wire       SD_MOSI,
+    input  wire       SD_MISO,
+
+    // UART 调试输出 (TX=H1)
+    output wire       O_uart_tx
 );
 
 
@@ -95,13 +105,29 @@ module design_top_wrapper (
     wire [19:0] S_candidate_count_cam;
     wire [21:0] S_bbox_xmin_cam, S_bbox_xmax_cam;
     wire [39:0] S_area_cam;
+    wire [19:0] S_area_th_cam;      // 自适应面积阈值 (isp_top.O_min_area, 仪表盘观察)
     wire [19:0] S_bbox_ymin_cam, S_bbox_ymax_cam;
     wire [1:0]  S_bbox_valid_cam;
+    // 烟头暗光亮点检测 (isp_top 输出, 相机域)
+    wire [7:0]  S_lum_th_cam;
+    wire [10:0] S_cig_xmin_cam, S_cig_xmax_cam;
+    wire [9:0]  S_cig_ymin_cam, S_cig_ymax_cam;
+    wire        S_cig_valid_cam;
+    wire [19:0] S_cig_count_cam;
+    wire        S_fire_valid_cam;   // 融合火情判定 (isp_top.O_fire_valid, csi域帧级)
+    wire [7:0]  S_confidence_cam;   // 检测置信度 (csi域帧级)
+    wire [95:0] S_snap_tdata;       // AWB 流 (TF卡告警快照源, isp_top.O_snap_tdata)
+    wire        S_snap_tuser, S_snap_tvalid;
 	reg  [19:0] S_min_area_config_hdmi;
 	reg         S_min_area_toggle_hdmi;
 	reg  [19:0] S_min_area_sync1_cam, S_min_area_sync2_cam, S_min_area_cam;
 	reg         S_min_area_toggle_sync1_cam, S_min_area_toggle_sync2_cam;
 	reg         S_min_area_toggle_sync2_d_cam;
+    reg  [10:0] S_roi_left_config_hdmi, S_roi_right_config_hdmi;
+    reg         S_roi_toggle_hdmi;
+    reg  [10:0] S_roi_left_sync1_cam, S_roi_left_sync2_cam, S_roi_left_cam;
+    reg  [10:0] S_roi_right_sync1_cam, S_roi_right_sync2_cam, S_roi_right_cam;
+    reg         S_roi_toggle_sync1_cam, S_roi_toggle_sync2_cam, S_roi_toggle_sync2_d_cam;
 	wire 			S_ISP_O_tlast ;
 	wire 			S_ISP_O_tuser ;
 	wire 			S_ISP_O_tvalid;
@@ -648,6 +674,9 @@ isp_top u_isp_top (
 .I_tdest         (),
 .O_tready        (S_ISP_O_tready),
 .I_min_area      (S_min_area_cam),
+.I_lum_th        (S_lum_th_cam    ),  // 烟头亮点阈值 (threshold_calib, csi域)
+.I_roi_left      (S_roi_left_cam),
+.I_roi_right     (S_roi_right_cam),
 .I_edge_key      (1'b1),           // KEY1 已上移至显示域 quad_top(五态循环), ISP 恒出原图
 .O_tdata         (S_ISP_O_tdata ),
 .O_candidate_count(S_candidate_count_cam),
@@ -659,11 +688,31 @@ isp_top u_isp_top (
 .O_bbox_ymax     (S_bbox_ymax_cam),
 .O_bbox_valid    (S_bbox_valid_cam),
 .O_area          (S_area_cam       ),
+.O_min_area      (S_area_th_cam    ),
+.O_fire_valid    (S_fire_valid_cam ),
+.O_confidence    (S_confidence_cam ),
+.O_cig_xmin      (S_cig_xmin_cam   ),
+.O_cig_xmax      (S_cig_xmax_cam   ),
+.O_cig_ymin      (S_cig_ymin_cam   ),
+.O_cig_ymax      (S_cig_ymax_cam   ),
+.O_cig_valid     (S_cig_valid_cam  ),
+.O_cig_count     (S_cig_count_cam  ),
+.O_snap_tdata    (S_snap_tdata     ),
+.O_snap_tuser    (S_snap_tuser     ),
+.O_snap_tvalid   (S_snap_tvalid    ),
 .O_tlast         (S_ISP_O_tlast ),
 .O_tuser         (S_ISP_O_tuser ),
 .O_tvalid        (S_ISP_O_tvalid),
 .I_tready        ()
   );
+
+// ---- 烟头亮点阈值标定: 长按 KEY2(板载, I_button[0]) 循环上调 LUM_TH (csi域) ----
+threshold_calib u_threshold_calib(
+    .I_clk    (S_csi_rx_clk),
+    .I_rst_n  (S_rst_n),
+    .I_key2   (I_button[0]),   // 板载KEY2 低有效; 短按仍归暂停, 长按上调阈值
+    .O_lum_th (S_lum_th_cam)
+);
 
 // The adjustable threshold is changed in the HDMI/control clock domain and
 // transferred as a stable bus with a toggle handshake into the camera domain.
@@ -686,18 +735,71 @@ always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
     end
 end
 
+// ROI 坐标以稳定总线+toggle方式原子同步到相机处理域，避免边界更新时左右坐标撕裂。
+always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+    if(!S_rst_n) begin
+        S_roi_left_sync1_cam <= 11'd320;
+        S_roi_left_sync2_cam <= 11'd320;
+        S_roi_left_cam <= 11'd320;
+        S_roi_right_sync1_cam <= 11'd960;
+        S_roi_right_sync2_cam <= 11'd960;
+        S_roi_right_cam <= 11'd960;
+        S_roi_toggle_sync1_cam <= 1'b0;
+        S_roi_toggle_sync2_cam <= 1'b0;
+        S_roi_toggle_sync2_d_cam <= 1'b0;
+    end else begin
+        S_roi_left_sync1_cam <= S_roi_left_config_hdmi;
+        S_roi_left_sync2_cam <= S_roi_left_sync1_cam;
+        S_roi_right_sync1_cam <= S_roi_right_config_hdmi;
+        S_roi_right_sync2_cam <= S_roi_right_sync1_cam;
+        S_roi_toggle_sync1_cam <= S_roi_toggle_hdmi;
+        S_roi_toggle_sync2_cam <= S_roi_toggle_sync1_cam;
+        S_roi_toggle_sync2_d_cam <= S_roi_toggle_sync2_cam;
+        if(S_roi_toggle_sync2_cam != S_roi_toggle_sync2_d_cam) begin
+            S_roi_left_cam <= S_roi_left_sync2_cam;
+            S_roi_right_cam <= S_roi_right_sync2_cam;
+        end
+    end
+end
+
 
 	// Frame-rate toggle provides a coherent transfer of the stable 20-bit count
 	// and bounding box (数据在帧内稳定, toggle边沿锁存无亚稳态问题).
+reg          S_fire_valid_sync;  // 同步到 hdmi 域
+reg  [7:0]   S_confidence_sync;  // 置信度同步到 hdmi 域
+wire         S_sec_write;        // snap_store <-> sd_card_top 扇区写握手
+wire [31:0]  S_sec_addr;
+wire [7:0]   S_sec_data;
+wire         S_sec_data_req, S_sec_write_end;
+wire [7:0]   S_snap_count;       // 快照完成计数 (调试 -> UART)
+(* keep = "true" *) reg [15:0] S_latency_cam;  // ISP流水线时延 (csi域拍数)
+reg [15:0]  S_lat_cnt;
 reg S_candidate_toggle_cam;
 reg S_candidate_toggle_sync1;
 reg S_candidate_toggle_sync2;
 reg S_candidate_toggle_sync2_d;
 reg [19:0] S_candidate_count_sync;
+reg [19:0] S_area_th_sync;
 reg [21:0] S_bbox_xmin_sync, S_bbox_xmax_sync;
 reg [19:0] S_bbox_ymin_sync, S_bbox_ymax_sync;
 reg [1:0]  S_bbox_valid_sync;
 reg [39:0] S_area_sync;
+reg [15:0] S_latency_sync;   // ISP段时延 (csi域拍数, 经toggle握手同步到hdmi域)
+reg        S_cig_valid_sync;  // 烟头判定 (csi域 -> hdmi域)
+reg [10:0] S_cig_xmin_sync, S_cig_xmax_sync;
+reg [9:0]  S_cig_ymin_sync, S_cig_ymax_sync;
+reg [19:0] S_cig_count_sync;
+// 烟头阈值 CDC (慢信号, 按键长按时才变, 2级同步足够)
+reg [7:0]  S_lum_th_sync1, S_lum_th_sync;
+always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+    if(!S_hdmi_rst_n) begin
+        S_lum_th_sync1 <= 8'd150;
+        S_lum_th_sync  <= 8'd150;
+    end else begin
+        S_lum_th_sync1 <= S_lum_th_cam;
+        S_lum_th_sync  <= S_lum_th_sync1;
+    end
+end
 always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
     if(!S_rst_n)
         S_candidate_toggle_cam <= 1'b0;
@@ -714,6 +816,14 @@ always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         S_bbox_ymin_sync <= 20'd0; S_bbox_ymax_sync <= 20'd0;
         S_bbox_valid_sync <= 2'b0;
         S_area_sync <= 40'd0;
+        S_area_th_sync <= 20'd64;
+        S_fire_valid_sync <= 1'b0;
+        S_confidence_sync <= 8'd0;
+        S_latency_sync <= 16'd0;
+        S_cig_valid_sync <= 1'b0;
+        S_cig_xmin_sync <= 11'd0; S_cig_xmax_sync <= 11'd0;
+        S_cig_ymin_sync <= 10'd0; S_cig_ymax_sync <= 10'd0;
+        S_cig_count_sync <= 20'd0;
     end else begin
         S_candidate_toggle_sync1 <= S_candidate_toggle_cam;
         S_candidate_toggle_sync2 <= S_candidate_toggle_sync1;
@@ -726,24 +836,88 @@ always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
             S_bbox_ymax_sync <= S_bbox_ymax_cam;
             S_bbox_valid_sync <= S_bbox_valid_cam;
             S_area_sync <= S_area_cam;
+            S_area_th_sync <= S_area_th_cam;
+            S_fire_valid_sync <= S_fire_valid_cam;
+            S_confidence_sync <= S_confidence_cam;
+            S_latency_sync <= S_latency_cam;
+            S_cig_valid_sync <= S_cig_valid_cam;
+            S_cig_xmin_sync <= S_cig_xmin_cam;
+            S_cig_xmax_sync <= S_cig_xmax_cam;
+            S_cig_ymin_sync <= S_cig_ymin_cam;
+            S_cig_ymax_sync <= S_cig_ymax_cam;
+            S_cig_count_sync <= S_cig_count_cam;
         end
     end
 end
 // 每帧一个脉冲, 作为判定模块的帧结算信号 (与计数锁存同一拍)
 wire S_frame_tick = (S_candidate_toggle_sync2 != S_candidate_toggle_sync2_d);
 
+// ---- 帧率量化: 1 秒窗口内计数帧 tick -> 整数 fps (S_hdmi_pixel_clk = 74.25MHz) ----
+reg [26:0] S_fps_win_cnt;   // 1秒窗口计数器 (74.25M 拍, 27bit)
+reg [6:0]  S_fps_cnt;       // 窗口内帧计数
+reg [6:0]  S_fps_reg;       // 锁存的帧率 (fps, 供 UART/OSD 输出)
+always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+    if(!S_hdmi_rst_n) begin
+        S_fps_win_cnt <= 27'd0;
+        S_fps_cnt     <= 7'd0;
+        S_fps_reg     <= 7'd0;
+    end else begin
+        if(S_frame_tick)
+            S_fps_cnt <= S_fps_cnt + 7'd1;
+        if(S_fps_win_cnt == 27'd74250000 - 27'd1) begin
+            S_fps_win_cnt <= 27'd0;
+            S_fps_reg     <= S_fps_cnt;
+            S_fps_cnt     <= 7'd0;
+        end else begin
+            S_fps_win_cnt <= S_fps_win_cnt + 27'd1;
+        end
+    end
+end
+
 // ---- 帧级目标有效标志 (连通域面积判定, 阈值默认64并支持按键调节) ----
 // fire: 至少一个红色连通域面积 >= MIN_AREA (bbox_valid两位分别对应面积排序的两个目标),
 //       有框必有警; (连通域检测取代原"候选像素计数>=2"判定: 绿色像素/散点噪声
 //       不形成 >=MIN_AREA 的连通域, 无法触发框选与告警)
 // cig: 小簇带判定废弃 (LED E10 恒灭, L2预留)
-wire S_fire_valid = |S_bbox_valid_sync;
-wire S_cig_valid  = 1'b0;
+wire S_fire_valid = S_fire_valid_sync;   // 融合判定 (feature_fuse, 经CDC同步)
+wire S_cig_valid  = S_cig_valid_sync;    // 烟头判定 (luma_spot+smoke_bbox, 经CDC同步)
 
-// ---- 模块1: ALARM告警 (多帧防抖 + 触发保持 + 总告警) ----
-// 防抖30帧(0.5s@60fps)触发, 撤警保持30帧(0.5s); sys_alarm为总告警,
-// snap_trig为总告警上升沿1拍脉冲, 预留作TF卡存图触发
-wire S_snap_trig;
+// ---- 快照触发: SW2(拨下/往SW2一侧=使能, 即I_sw[1]=0) + 明火框(bbox) 或 烟头 短防抖(约4帧) + 30帧保持去重 ----
+// 触发源 = |S_bbox_valid_sync(红框) || S_cig_valid(烟头), 用户可见即触发。
+// SW2 拨上=禁止抓拍: cand恒0 -> 防抖清零、armed 30帧后释放, 在途抓拍自然完成。
+reg [1:0]  S_snap_deb_cnt;
+reg [4:0]  S_snap_hold_cnt;
+reg        S_snap_armed;
+reg        S_snap_trig;
+wire       S_snap_en   = ~I_sw[1];                                // SW2: 拨下(往SW2一侧)=抓拍使能, 拨上=禁止
+wire       S_snap_cand = S_snap_en && (|S_bbox_valid_sync || S_cig_valid);
+always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+    if(!S_hdmi_rst_n) begin
+        S_snap_deb_cnt  <= 2'd0;
+        S_snap_hold_cnt <= 5'd0;
+        S_snap_armed    <= 1'b0;
+        S_snap_trig     <= 1'b0;
+    end else begin
+        S_snap_trig <= 1'b0;  // 默认脉冲清零
+        // 防抖计数 (候选连续帧)
+        if(S_snap_cand)
+            S_snap_deb_cnt <= (S_snap_deb_cnt == 2'd3) ? 2'd3 : S_snap_deb_cnt + 2'd1;
+        else
+            S_snap_deb_cnt <= 2'd0;
+        // 保持: 候选消失 30 帧后解除 armed (去重, 防连拍)
+        if(!S_snap_cand) begin
+            if(S_snap_hold_cnt == 5'd30) S_snap_armed <= 1'b0;
+            else S_snap_hold_cnt <= S_snap_hold_cnt + 5'd1;
+        end else begin
+            S_snap_hold_cnt <= 5'd0;
+        end
+        // 触发: 候选连续约 4 帧 + 未 armed
+        if(S_snap_cand && (S_snap_deb_cnt == 2'd3) && !S_snap_armed) begin
+            S_snap_trig <= 1'b1;
+            S_snap_armed <= 1'b1;
+        end
+    end
+end
 alarm_module #(
     .DEBOUNCE (16'd30),
     .HOLD     (16'd30)
@@ -757,7 +931,7 @@ alarm_module #(
     .O_fire_alarm (O_led_fire      ),
     .O_cig_alarm  (O_led_cig       ),
     .O_sys_alarm  (O_led_sys       ),
-    .O_snap_trig  (S_snap_trig     )
+    .O_snap_trig  (                )   // 快照触发改用独立短防抖, 不再用 alarm 30帧防抖
 );
 
 // ---- detect_judge保留为蜂鸣音型发生器 (国标火警双音交替) ----
@@ -769,10 +943,106 @@ detect_judge u_detect_judge(
     .I_frame_tick  (S_frame_tick          ),
     .I_candidate   (S_candidate_count_sync),
     .I_fire_valid  (S_fire_valid          ),
+    .I_cig_valid   (S_cig_valid           ),
     .O_alarm_fire  (                      ),
     .O_alarm_cig   (                      ),
     .O_buzzer      (O_buzzer              )
 );
+
+// ---- 模块: TF卡告警快照 (snap_store 缩略图+日志 -> sd_card_top 环形裸扇区) ----
+// 全旁路: 不插入视频数据通路, SD异常不影响显示/检测/告警主功能。
+reg  S_snap_trig_stretch;
+reg  [3:0] S_snap_stretch_cnt;
+always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+    if(!S_hdmi_rst_n) begin
+        S_snap_trig_stretch <= 1'b0;
+        S_snap_stretch_cnt  <= 4'd0;
+    end else if(S_snap_trig) begin
+        S_snap_trig_stretch <= 1'b1;
+        S_snap_stretch_cnt  <= 4'd0;
+    end else if(S_snap_trig_stretch) begin
+        if(S_snap_stretch_cnt == 4'd15) S_snap_trig_stretch <= 1'b0;
+        else S_snap_stretch_cnt <= S_snap_stretch_cnt + 1'b1;
+    end
+end
+
+snap_store u_snap_store(
+    .I_clk        (S_csi_rx_clk         ),
+    .I_rst_n      (S_rst_n              ),
+    .I_tuser      (S_snap_tuser         ),
+    .I_tvalid     (S_snap_tvalid        ),
+    .I_tdata      (S_snap_tdata         ),
+    .I_snap_trig  (S_snap_trig_stretch  ),
+    .I_fire_valid (|S_bbox_valid_cam    ),
+    .I_cig_valid  (S_cig_valid_cam      ),
+    .I_fire_area  (S_area_cam[19:0]     ),
+    .I_cig_count  (S_cig_count_cam      ),
+    .I_fxmin      (S_bbox_xmin_cam[10:0]),
+    .I_fxmax      (S_bbox_xmax_cam[10:0]),
+    .I_fymin      (S_bbox_ymin_cam[9:0] ),
+    .I_fymax      (S_bbox_ymax_cam[9:0] ),
+    .I_cxmin      (S_cig_xmin_cam       ),
+    .I_cxmax      (S_cig_xmax_cam       ),
+    .I_cymin      (S_cig_ymin_cam       ),
+    .I_cymax      (S_cig_ymax_cam       ),
+    .O_sec_write  (S_sec_write          ),
+    .O_sec_addr   (S_sec_addr           ),
+    .O_sec_data   (S_sec_data           ),
+    .O_snap_count (S_snap_count         ),
+    .I_data_req   (S_sec_data_req       ),
+    .I_write_end  (S_sec_write_end      )
+);
+sd_card_top #(
+    .SPI_LOW_SPEED_DIV  (248),
+    .SPI_HIGH_SPEED_DIV (1)
+) u_sd_card_top(
+    .clk                  (S_csi_rx_clk    ),
+    .rst                  (~S_rst_n        ),
+    .SD_nCS               (SD_nCS          ),
+    .SD_DCLK              (SD_DCLK         ),
+    .SD_MOSI              (SD_MOSI         ),
+    .SD_MISO              (SD_MISO         ),
+    .sd_init_done         (),
+    .sd_sec_read          (1'b0            ),
+    .sd_sec_read_addr     (32'd0           ),
+    .sd_sec_read_data     (),
+    .sd_sec_read_data_valid(),
+    .sd_sec_read_end      (),
+    .sd_sec_write         (S_sec_write     ),
+    .sd_sec_write_addr    (S_sec_addr      ),
+    .sd_sec_write_data    (S_sec_data      ),
+    .sd_sec_write_data_req(S_sec_data_req  ),
+    .sd_sec_write_end     (S_sec_write_end )
+);
+
+// ---- 模块: UART 调试输出 (检测状态每秒一行) ----
+uart_debug u_uart_debug(
+    .I_clk        (S_hdmi_pixel_clk),
+    .I_rst_n      (S_hdmi_rst_n    ),
+    .I_frame_tick (S_frame_tick    ),
+    .I_fire_valid (S_fire_valid    ),
+    .I_cig_valid  (S_cig_valid     ),
+    .I_lum_th     (S_lum_th_sync   ),
+    .I_fps        (S_fps_reg       ),
+    .I_latency    (S_latency_sync  ),
+    .I_snap_count (S_snap_count    ),
+    .O_tx_pin     (O_uart_tx       )
+);
+
+// ---- 时延量化: ISP 输入帧头 -> ISP 输出帧头 的拍数 (csi时钟域) ----
+always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+    if(!S_rst_n) begin
+        S_lat_cnt     <= 16'd0;
+        S_latency_cam <= 16'd0;
+    end else if(S_raw_tuser) begin
+        S_lat_cnt <= 16'd0;
+    end else if(S_ISP_O_tuser) begin
+        S_latency_cam <= S_lat_cnt;
+        S_lat_cnt     <= 16'd0;
+    end else begin
+        S_lat_cnt <= S_lat_cnt + 16'd1;
+    end
+end
 // ---- K3/K4 专用于面积门槛减/加；K1视图切换、K2画面暂停保持原功能 ----
     wire S_pause_key_trig;
     reg S_area_down_trig;
@@ -889,17 +1159,67 @@ detect_judge u_detect_judge(
         end
     end
 
-    wire S_threshold_mode = 1'b0;
+    // HX1P35A schematic names the four GPIO nets SW0..SW3:
+    //   SW0/A4=physical SW1, SW1/B4=physical SW2,
+    //   SW2/E11=physical SW3, SW3/D11=physical SW4.
+    // Keep the board silk-screen numbering explicit here; the extra SW5/SW6
+    // on the board are peripheral switches and are not part of I_sw[3:0].
+    // Board test showed the physical SW3/SW4 ROI enables are opposite to the
+    // earlier assumed bit assignment: SW3 drives I_sw[3], SW4 drives I_sw[2].
+    // Board observation: SW1-UP is active-low at I_sw[0]; invert only this mode input.
+
+    wire S_sw1_threshold = I_sw[0];
+    wire S_sw2_capture   = I_sw[1];
+    wire S_sw3_right_roi = I_sw[3];
+    wire S_sw4_left_roi  = I_sw[2];
+    wire S_threshold_mode = ~S_sw1_threshold; // SW1拨上: 手动阈值模式
+    // Keep the guides one displayed pixel clear of the central split line.
+    localparam [10:0] ROI_X_MAX = 11'd1277;
+    localparam [10:0] ROI_STEP = 11'd8;
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_roi_left_config_hdmi <= 11'd320;
+            S_roi_right_config_hdmi <= 11'd960;
+            S_roi_toggle_hdmi <= 1'b0;
+        end else if(!S_threshold_mode && (S_area_down_trig || S_area_up_trig)) begin
+            if(S_area_down_trig) begin // K3: enabled boundary moves right
+                if(S_sw4_left_roi) begin // physical SW4 enables left boundary
+                    if(S_roi_left_config_hdmi > ROI_X_MAX - ROI_STEP)
+                        S_roi_left_config_hdmi <= ROI_X_MAX;
+                    else
+                        S_roi_left_config_hdmi <= S_roi_left_config_hdmi + ROI_STEP;
+                end
+                if(S_sw3_right_roi) begin // physical SW3 enables right boundary
+                    if(S_roi_right_config_hdmi > ROI_X_MAX - ROI_STEP)
+                        S_roi_right_config_hdmi <= ROI_X_MAX;
+                    else
+                        S_roi_right_config_hdmi <= S_roi_right_config_hdmi + ROI_STEP;
+                end
+                if(S_sw4_left_roi || S_sw3_right_roi)
+                    S_roi_toggle_hdmi <= ~S_roi_toggle_hdmi;
+            end else begin // K4: enabled boundary moves left
+                if(S_sw4_left_roi)
+                    S_roi_left_config_hdmi <= (S_roi_left_config_hdmi < ROI_STEP) ?
+                                              11'd0 : S_roi_left_config_hdmi - ROI_STEP;
+                if(S_sw3_right_roi)
+                    S_roi_right_config_hdmi <= (S_roi_right_config_hdmi < ROI_STEP) ?
+                                               11'd0 : S_roi_right_config_hdmi - ROI_STEP;
+                if(S_sw4_left_roi || S_sw3_right_roi)
+                    S_roi_toggle_hdmi <= ~S_roi_toggle_hdmi;
+            end
+        end
+    end
+
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         if(!S_hdmi_rst_n) begin
             S_min_area_config_hdmi <= 20'd64;
             S_min_area_toggle_hdmi <= 1'b0;
-        end else if(S_area_down_trig) begin
+        end else if(S_threshold_mode && S_area_down_trig) begin
             if(S_min_area_config_hdmi > 20'd64) begin
                 S_min_area_config_hdmi <= S_min_area_config_hdmi - 20'd64;
                 S_min_area_toggle_hdmi <= ~S_min_area_toggle_hdmi;
             end
-        end else if(S_area_up_trig) begin
+        end else if(S_threshold_mode && S_area_up_trig) begin
             if(S_min_area_config_hdmi < 20'd65536) begin
                 S_min_area_config_hdmi <= S_min_area_config_hdmi + 20'd64;
                 S_min_area_toggle_hdmi <= ~S_min_area_toggle_hdmi;
@@ -1162,20 +1482,20 @@ detect_judge u_detect_judge(
         .O_hdmi_data     ( S_hdmi_out_data    )
     );
 
-    // ========== 模块2: OSD矩形框选 (明火红框/烟头黄框, alpha混合) ==========
+    // ========== 模块2: OSD矩形框选 (仅显示明火红框；烟头候选不叠加黄框) ==========
     // 坐标源: color_mask_96候选外接框 (经toggle CDC同步到hdmi域, 帧级锁存)
     // 双目标(OBJ_MAX=2): 两个红光连通域分别画框, 任一目标有效即触发告警
     wire [23:0] S_box_rgb;
     wire [4:0]  S_box_alpha;
     wire        S_box_de, S_box_hsync, S_box_vsync;
-    wire [1:0]  S_box_valid = S_bbox_valid_sync;
+    wire [2:0]  S_box_valid = {1'b0, S_bbox_valid_sync};  // 仅显示两个明火框；烟头检测/告警/抓拍仍保留
 
     // 每个目标独立映射: QUAD模式缩小一半并平移到右下象限;
     // 全屏模式保留摄像头原坐标。每段打包宽度与 osd_box 的端口约定一致。
-    wire [21:0] S_bbox_xmin_eff;
-    wire [21:0] S_bbox_xmax_eff;
-    wire [19:0] S_bbox_ymin_eff;
-    wire [19:0] S_bbox_ymax_eff;
+    wire [32:0] S_bbox_xmin_eff;
+    wire [32:0] S_bbox_xmax_eff;
+    wire [29:0] S_bbox_ymin_eff;
+    wire [29:0] S_bbox_ymax_eff;
     genvar box_i;
     generate
         for(box_i=0; box_i<2; box_i=box_i+1) begin : GEN_BBOX_MAP
@@ -1194,8 +1514,17 @@ detect_judge u_detect_judge(
                 ({1'b0, ymax_in[9:1]} + 10'd360) : ymax_in;
         end
     endgenerate
+    // 目标2坐标仍保留供日志/调试；当前不绘制烟头候选黄框
+    assign S_bbox_xmin_eff[2*11 +: 11] = S_quad_mode_hdmi ?
+        ({1'b0, S_cig_xmin_sync[10:1]} + 11'd640) : S_cig_xmin_sync;
+    assign S_bbox_xmax_eff[2*11 +: 11] = S_quad_mode_hdmi ?
+        ({1'b0, S_cig_xmax_sync[10:1]} + 11'd640) : S_cig_xmax_sync;
+    assign S_bbox_ymin_eff[2*10 +: 10] = S_quad_mode_hdmi ?
+        ({1'b0, S_cig_ymin_sync[9:1]} + 10'd360) : S_cig_ymin_sync;
+    assign S_bbox_ymax_eff[2*10 +: 10] = S_quad_mode_hdmi ?
+        ({1'b0, S_cig_ymax_sync[9:1]} + 10'd360) : S_cig_ymax_sync;
     osd_box #(
-        .OBJ_MAX  (2),
+        .OBJ_MAX  (3),
         .BORDER_T (4'd4)
     ) u_osd_box(
         .I_clk        (S_hdmi_pixel_clk),
@@ -1208,7 +1537,7 @@ detect_judge u_detect_judge(
         .I_xmax       (S_bbox_xmax_eff   ),
         .I_ymax       (S_bbox_ymax_eff   ),
         .I_obj_valid  (S_box_valid     ),
-        .I_obj_class  (4'b0101),       // 两个目标均为红光/明火类别(01)
+        .I_obj_class  (6'b100101),       // 目标2=烟头(10), 目标1/0=明火(01)
         .O_osd_pixel  (S_box_rgb       ),
         .O_osd_alpha  (S_box_alpha     ),
         .O_de_out     (S_box_de        ),
@@ -1279,8 +1608,56 @@ detect_judge u_detect_judge(
                                 S_blend2_b_full[11:4]};
     wire [23:0] S_hdmi_tx_data_final = S_alarm_de ? S_blend2_rgb : S_box_blend_d;
 
+    // ========== 模块3.5: 检测链状态仪表盘 OSD (osd_status, 全屏视图左下角仪器版面板) ==========
+    // 第三级 OSD, 级联在告警文字之后, 同构 1 拍流水 (与 quad_top 的 vid+3拍 对齐约定不变)。
+    // 显隐组合方案: I_show=(view_mode!=0) 全屏视图常显; 内部 popup 逻辑在告警时强制弹出
+    // (QUAD 显示判定流, 弹窗面板自然叠加), 消退3秒后收起。
+    wire [23:0] S_param_rgb;
+    wire [3:0]  S_param_alpha;
+    wire        S_param_de, S_param_hsync, S_param_vsync;
+    wire [2:0]  S_view_mode_hdmi;
+    osd_status u_osd_status(
+        .I_clk        (S_hdmi_pixel_clk     ),
+        .I_rst_n      (S_hdmi_rst_n         ),
+        .I_de         (S_alarm_de           ),
+        .I_hsync      (S_alarm_hsync        ),
+        .I_vsync      (S_alarm_vsync        ),
+        .I_show       (S_view_mode_hdmi != 3'd0),  // 全屏视图常显 (QUAD 仅告警弹出)
+        .I_frame_tick (S_frame_tick         ),
+        .I_cand_count (S_candidate_count_sync),
+        .I_area_th    (S_area_th_sync       ),
+        .I_latency    (S_latency_sync       ),
+        .I_fps        (S_fps_reg            ),
+        .I_snap_count (S_snap_count         ),
+        .I_fire_valid (S_fire_valid         ),
+        .O_osd_pixel  (S_param_rgb          ),
+        .O_osd_alpha  (S_param_alpha        ),
+        .O_de_out     (S_param_de           ),
+        .O_hsync_out  (S_param_hsync        ),
+        .O_vsync_out  (S_param_vsync        )
+    );
+    // 视频延迟1拍, 与面板输出同拍对齐
+    reg [23:0] S_alarm_blend_d;
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n)
+            S_alarm_blend_d <= 24'd0;
+        else
+            S_alarm_blend_d <= S_hdmi_tx_data_final;
+    end
+    // 第三级 Alpha混合 (整数运算): 面板底衬半透明(8/16), 文字/边框不透明
+    wire [13:0] S_blend3_r_full = ({6'd0, S_alarm_blend_d[23:16]} * (5'd16 - S_param_alpha)) +
+                                  ({6'd0, S_param_rgb[23:16]} * S_param_alpha) + 14'd8;
+    wire [13:0] S_blend3_g_full = ({6'd0, S_alarm_blend_d[15:8]}  * (5'd16 - S_param_alpha)) +
+                                  ({6'd0, S_param_rgb[15:8]}  * S_param_alpha) + 14'd8;
+    wire [13:0] S_blend3_b_full = ({6'd0, S_alarm_blend_d[7:0]}   * (5'd16 - S_param_alpha)) +
+                                  ({6'd0, S_param_rgb[7:0]}   * S_param_alpha) + 14'd8;
+    wire [23:0] S_blend3_rgb = {S_blend3_r_full[11:4],
+                                S_blend3_g_full[11:4],
+                                S_blend3_b_full[11:4]};
+    wire [23:0] S_hdmi_tx_data_param = S_param_de ? S_blend3_rgb : S_alarm_blend_d;
+
     // ========== 模块4: 四分屏/全屏视图 (KEY1 五态循环: QUAD->原图->边缘->掩码->判定) ==========
-    // I_vid_*: 原图流 (hdmi_mixer输出, 3拍); I_det_*: 判定流 (S_alarm_*, 5拍)
+    // I_vid_*: 原图流 (hdmi_mixer输出, 3拍); I_det_*: 判定流 (alarm流补1拍, 6拍)
     // 模块内: sobel_disp(原图+2拍)/mask_disp(原图+1拍)/延迟对齐, 四路统一到判定流相位
     // QUAD模式: 画面来自DDR拼接帧(quad_writer), 本模块仅叠加象限标签/分隔线/模式名
     // 全屏模式: 4:1 mux 直选对应流, 右上角叠加模式名
@@ -1291,19 +1668,23 @@ detect_judge u_detect_judge(
         .I_rst_n      (S_hdmi_rst_n    ),
         .I_key        (I_button[1]     ),   // KEY1: 五态循环 (低有效, 模块内消抖)
         .I_view_enable(1'b1),
+        .I_sw2        (~S_sw2_capture  ),   // physical SW2 拨下(往SW2一侧)=显示抓拍使能图标
+        .I_sw_raw     (I_sw            ),   // 物理 SW1..SW4 原始高低电平诊断条
+        .I_roi_left   (S_roi_left_config_hdmi),
+        .I_roi_right  (S_roi_right_config_hdmi),
         .I_vid_de     (S_hdmi_out_de   ),
         .I_vid_hsync  (S_hdmi_out_hsync),
         .I_vid_vsync  (S_hdmi_out_vsync),
         .I_vid_data   (S_hdmi_out_data ),
-        .I_det_de     (S_alarm_de      ),
-        .I_det_hsync  (S_alarm_hsync   ),
-        .I_det_vsync  (S_alarm_vsync   ),
-        .I_det_data   (S_hdmi_tx_data_final),
+        .I_det_de     (S_param_de       ),
+        .I_det_hsync  (S_param_hsync    ),
+        .I_det_vsync  (S_param_vsync    ),
+        .I_det_data   (S_hdmi_tx_data_param),
         .O_de         (S_quad_ode      ),
         .O_hsync      (S_quad_ohsync   ),
         .O_vsync      (S_quad_ovsync   ),
         .O_data       (S_quad_odata    ),
-        .O_view_mode  (                ),
+        .O_view_mode  (S_view_mode_hdmi),
         .O_quad_mode  (S_quad_mode_hdmi)
     );
 

@@ -10,7 +10,7 @@
 // ============================================================
 module alarm_module #(
     parameter [15:0] DEBOUNCE = 16'd30,   // 防抖帧数: 连续30帧@60fps≈0.5s
-    parameter [15:0] HOLD     = 16'd60    // 告警保持帧数: 1s@60fps
+    parameter [15:0] HOLD     = 16'd30    // 告警保持帧数: 0.5s@60fps (与 wrapper 实例化一致)
 )(
     input         I_clk,           // 像素时钟 (74.25MHz)
     input         I_rst_n,

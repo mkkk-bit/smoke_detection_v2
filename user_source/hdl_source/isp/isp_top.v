@@ -8,6 +8,9 @@ module isp_top (
     input [9:0] 	I_tdest			,
     input 			O_tready		,
 	input [19:0]    I_min_area,
+	input [7:0]     I_lum_th,       // 烟头暗光亮点亮度阈值 (threshold_calib, csi域)
+	input [10:0]    I_roi_left,
+	input [10:0]    I_roi_right,
     input 			I_edge_key		,	// KEY1: 边缘检测切换按键(低有效, 直连板级I_button[1])
     output [127:0] 	O_tdata			,
     output [19:0]   O_candidate_count,
@@ -22,6 +25,19 @@ module isp_top (
     output [19:0]   O_bbox_ymax,
     output [1:0]    O_bbox_valid,    // bit i = 第i大目标有效
     output [39:0]   O_area,          // [i*20+:20] = 第i大目标面积 (标定观察)
+    output [19:0]   O_min_area,      // 自适应面积阈值 (feature_fuse, 仪表盘观察)
+    output          O_fire_valid,    // 四维融合火情判定 (feature_fuse, 帧级)
+    output [7:0]    O_confidence,    // 检测置信度 0~99 (feature_fuse)
+    // 烟头暗光亮点检测 (luma_spot + smoke_bbox, 帧级)
+    output [10:0]   O_cig_xmin,
+    output [10:0]   O_cig_xmax,
+    output [9:0]    O_cig_ymin,
+    output [9:0]    O_cig_ymax,
+    output          O_cig_valid,     // 烟头判定: 亮点面积在 [CNT_MIN,CNT_MAX]
+    output [19:0]   O_cig_count,     // 烟头亮点像素数 (标定观察)
+    output [95:0]   O_snap_tdata,    // AWB RGB888 96bit 流 (TF卡告警快照源)
+    output          O_snap_tuser,
+    output          O_snap_tvalid,
     output 			O_tlast			,
     output 			O_tuser			,
     output 			O_tvalid		,
@@ -54,6 +70,32 @@ wire         m_aixs_tvalid;  //synthesis keep
   wire [95:0]   mask_O_tdata;
   wire         mask_O_tvalid;
   wire [3:0]    mask_candidate;
+  wire [29:0]   mask_cand_edge_sum;  // 候选区边缘能量 (color_mask -> feature_fuse)
+  wire [29:0]   mask_luma_sum;       // 场景亮度 (color_mask -> feature_fuse)
+  wire [29:0]   mask_cand_sat_sum;   // 候选区饱和度 (color_mask -> feature_fuse)
+  wire [19:0]   fuse_min_area;       // 自适应面积阈值 (feature_fuse -> detect_ccl)
+  wire          fuse_fire_valid;     // 融合判定 (feature_fuse -> 顶层)
+  wire [7:0]    fuse_confidence;     // 检测置信度 (feature_fuse -> 顶层)
+
+// Hold ROI coordinates constant for a whole frame. A control update arriving
+// mid-frame is applied atomically on the next AWB frame-start beat.
+reg [10:0] S_roi_left_frame, S_roi_right_frame;
+always @(posedge axi4s_video_aclk or negedge I_rst_n) begin
+    if(!I_rst_n) begin
+        S_roi_left_frame  <= 11'd320;
+        S_roi_right_frame <= 11'd960;
+    end else if(awb_O_tuser) begin
+        S_roi_left_frame  <= I_roi_left;
+        S_roi_right_frame <= I_roi_right;
+    end
+end
+wire [10:0] S_roi_left_effective  = awb_O_tuser ? I_roi_left  : S_roi_left_frame;
+wire [10:0] S_roi_right_effective = awb_O_tuser ? I_roi_right : S_roi_right_frame;
+
+  // ---- 烟头暗光亮点检测 (luma_spot -> smoke_bbox) ----
+  wire [3:0]    luma_mask;           // 亮点掩码 (每拍4bit)
+  wire          luma_O_tlast, luma_O_tuser, luma_O_tvalid;
+  wire [95:0]   luma_O_tdata;        // 亮点伪彩 (暂不接显示通路)
 
   wire         awb_O_tuser_128;  //synthesis keep
   wire         awb_O_tvalid_128;  //synthesis keep
@@ -188,12 +230,17 @@ color_mask_96 #(
     .I_tuser        (awb_O_tuser),
     .I_tdata        (awb_O_tdata),
     .I_tvalid       (awb_O_tvalid),
+    .I_roi_left     (S_roi_left_effective),
+    .I_roi_right    (S_roi_right_effective),
     .O_tlast        (mask_O_tlast),
     .O_tuser        (mask_O_tuser),
     .O_tdata        (mask_O_tdata),
     .O_tvalid       (mask_O_tvalid),
     .O_frame_count  (O_candidate_count),
-    .O_candidate    (mask_candidate)
+    .O_candidate    (mask_candidate),
+    .O_cand_edge_sum(mask_cand_edge_sum),
+    .O_luma_sum     (mask_luma_sum),
+    .O_cand_sat_sum (mask_cand_sat_sum)
 );
 // ---- 连通域检测: 红色候选 → 多目标外接框+面积 ----
 // 4邻域 union-find 合并, 按面积降序输出全部达标连通域 (MAX_OBJ=2);
@@ -219,7 +266,7 @@ detect_ccl_96 #(
     .I_tuser      (awb_O_tuser),
     .I_tlast      (awb_O_tlast),
     .I_tvalid     (awb_O_tvalid),
-    .I_min_area   (S_min_area_frame),
+    .I_min_area   (fuse_min_area),
     .O_bbox_xmin  (O_bbox_xmin),
     .O_bbox_xmax  (O_bbox_xmax),
     .O_bbox_ymin  (O_bbox_ymin),
@@ -227,6 +274,67 @@ detect_ccl_96 #(
     .O_bbox_valid (O_bbox_valid),
     .O_area       (O_area)
 );
+// ---- 四维特征帧级融合: 候选数/边缘能量/亮度 -> 自适应面积阈值 + 火情判定 ----
+// I_area_base 接 S_min_area_frame (按键K3/K4手动门槛的帧锁存值), 自适应在其上叠加
+feature_fuse u_feature_fuse(
+    .I_clk            (axi4s_video_aclk),
+    .I_rst_n          (I_rst_n),
+    .I_tuser          (awb_O_tuser),
+    .I_candidate_count(O_candidate_count),
+    .I_cand_edge_sum  (mask_cand_edge_sum),
+    .I_luma_sum       (mask_luma_sum),
+    .I_cand_sat_sum   (mask_cand_sat_sum),
+    .I_bbox_valid     (O_bbox_valid),
+    .I_area_base      (S_min_area_frame),
+    .O_min_area       (fuse_min_area),
+    .O_fire_valid     (fuse_fire_valid),
+    .O_confidence     (fuse_confidence)
+);
+// 自适应面积阈值导出 (仪表盘 OSD 观察)
+assign O_min_area = fuse_min_area;
+// ---- 烟头暗光亮点检测: luma_spot(亮点掩码) -> smoke_bbox(包围盒+面积判定) ----
+// 常驻并行, 与明火检测链(color_mask->detect_ccl)同源、互不影响。
+luma_spot #(
+    .IMG_WIDTH (1280),
+    .IMG_HEIGHT(720)
+) u_luma_spot (
+    .I_clk      (axi4s_video_aclk),
+    .I_rst_n    (I_rst_n),
+    .I_tlast    (awb_O_tlast),
+    .I_tuser    (awb_O_tuser),
+    .I_tvalid   (awb_O_tvalid),
+    .I_tdata    (awb_O_tdata),
+    .I_lum_th   (I_lum_th),
+    .O_mask     (luma_mask),
+    .O_tdata    (luma_O_tdata),
+    .O_tlast    (luma_O_tlast),
+    .O_tuser    (luma_O_tuser),
+    .O_tvalid   (luma_O_tvalid)
+);
+smoke_bbox_96 #(
+    .IMG_WIDTH (1280),
+    .IMG_HEIGHT(720)
+) u_smoke_bbox_96 (
+    .I_clk       (axi4s_video_aclk),
+    .I_rst_n     (I_rst_n),
+    .I_mask      (luma_mask),
+    .I_roi_left  (S_roi_left_effective),
+    .I_roi_right (S_roi_right_effective),
+    .I_tuser     (awb_O_tuser),
+    .I_tlast     (awb_O_tlast),
+    .I_tvalid    (awb_O_tvalid),
+    .O_bbox_xmin (O_cig_xmin),
+    .O_bbox_xmax (O_cig_xmax),
+    .O_bbox_ymin (O_cig_ymin),
+    .O_bbox_ymax (O_cig_ymax),
+    .O_valid     (O_cig_valid),
+    .O_count     (O_cig_count)
+);
+assign O_fire_valid = fuse_fire_valid;
+assign O_confidence = fuse_confidence;
+assign O_snap_tdata  = awb_O_tdata;
+assign O_snap_tuser  = awb_O_tuser;
+assign O_snap_tvalid = awb_O_tvalid;
 // ---- 边缘检测 (lab_ex2功能, 与原图通路并行运行) ----
 edge_detect_96 #(
     .IMG_WIDTH (1280),

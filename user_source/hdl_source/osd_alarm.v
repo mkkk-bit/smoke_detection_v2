@@ -257,8 +257,9 @@ module osd_alarm(
         cx = I_quad_mode ? cx_local[2:0] : cx_local[3:1];   // 源字模列 (1x直用 / 2x>>1)
     end
     // 文字命中 = 有效区 && 告警 && 文本区域 && 字符列 && 点阵点亮(2x2块)
+    wire [7:0] text_font_byte = font_byte(ch_idx, font_row);
     wire text_hit = de && r_alarm && in_text_x && in_text_y && ch_col &&
-                    font_byte(ch_idx, font_row)[7 - cx];
+                    text_font_byte[7 - cx];
 
     // 总命中: 警示框(可选) 或 文字, 均在告警有效时
     wire hit = r_alarm && (frame_hit || text_hit);
