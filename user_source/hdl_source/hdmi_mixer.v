@@ -61,6 +61,15 @@ module hdmi_mixer #(
     reg [11:0] S_logo_red_x_end;
     reg [14:0] S_logo_addr;
     wire[24:0] S_logo_pixel;
+    // 75% transparent: logo contributes 4/16, video contributes 12/16.
+    localparam [3:0] LOGO_ALPHA = 4'd4;
+    wire [12:0] S_logo_blend_r = ({5'd0, S_video_data_2d[23:16]} * (5'd16 - LOGO_ALPHA)) +
+                                  ({5'd0, S_logo_pixel[23:16]} * LOGO_ALPHA) + 13'd8;
+    wire [12:0] S_logo_blend_g = ({5'd0, S_video_data_2d[15:8]} * (5'd16 - LOGO_ALPHA)) +
+                                  ({5'd0, S_logo_pixel[15:8]} * LOGO_ALPHA) + 13'd8;
+    wire [12:0] S_logo_blend_b = ({5'd0, S_video_data_2d[7:0]} * (5'd16 - LOGO_ALPHA)) +
+                                  ({5'd0, S_logo_pixel[7:0]} * LOGO_ALPHA) + 13'd8;
+    wire [23:0] S_logo_blend_rgb = {S_logo_blend_r[11:4], S_logo_blend_g[11:4], S_logo_blend_b[11:4]};
     reg [31:0] S_frame_cnt;
     reg [19:0] S_bcd_bin_shift;
     reg [23:0] S_bcd_shift;
@@ -752,7 +761,7 @@ module hdmi_mixer #(
                 S_logo_addr = S_logo_y * LOGO_W + S_logo_x;
                 if(S_logo_pixel[24]) begin
                     S_osd_hit   = 1'b1;
-                    S_osd_color = S_logo_pixel[23:0];
+                    S_osd_color = S_logo_blend_rgb;
                 end
             end
 
